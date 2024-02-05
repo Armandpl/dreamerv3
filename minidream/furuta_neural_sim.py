@@ -7,7 +7,7 @@ import torch
 from furuta.rl.envs.furuta_base import FurutaBase
 from furuta.utils import VelocityFilter
 
-from minidream.rssm import RSSM
+from minidream.rssm import GRU_RECCURENT_UNITS, RSSM, STOCHASTIC_STATE_SIZE, symexp
 
 
 class FurutaNeuralSim(FurutaBase):
@@ -24,7 +24,7 @@ class FurutaNeuralSim(FurutaBase):
 
         super().__init__(control_freq, reward, angle_limits, speed_limits, render_mode)
         self.rssm = RSSM(
-            observation_space=gymnasium.spaces.Box(low=-1, high=1, shape=(4,)),
+            observation_space=gymnasium.spaces.Box(low=-1, high=1, shape=(2,)),
             action_space=gymnasium.spaces.Box(low=-1, high=1, shape=(1,)),
         )
         torch.set_grad_enabled(False)
@@ -43,15 +43,13 @@ class FurutaNeuralSim(FurutaBase):
         self._state = 0.01 * np.float32(np.random.randn(self.state_space.shape[0]))
 
         # setup first recurrent state
-        h0 = torch.zeros(1, 128)
-        z0 = torch.zeros(1, 1024)  # init stochastic state
+        h0 = torch.zeros(1, GRU_RECCURENT_UNITS)
+        z0 = torch.zeros(1, STOCHASTIC_STATE_SIZE**2)  # init stochastic state
         a0 = torch.zeros(1, 1)  # init action
         # get rssm obs (cos_theta, sin_theta, cos_alpha, sin_alpha)
         rssm_obs = torch.tensor(
             [
                 np.cos(self._state[0]),
-                np.sin(self._state[0]),
-                np.cos(self._state[1]),
                 np.sin(self._state[1]),
             ]
         ).unsqueeze(0)
@@ -65,17 +63,17 @@ class FurutaNeuralSim(FurutaBase):
         a = torch.tensor(a, dtype=torch.float).view(1, 1)
         self.ht = self.rssm.recurrent_model(ht_minus_1=self.ht, zt_minus_1=self.zt, a=a)
         # predict zt_hat from ht
-        self.zt, _ = self.rssm.transition_model(self.ht)
+        zt_dist, _ = self.rssm.transition_model(self.ht)
+        self.zt = zt_dist.sample()
 
         # concat zt_hat and ht, reconstruct obs
-        recon = self.rssm.decoder(ht=self.ht, zt=self.zt)[0]
+        recon_obs = self.rssm.decoder(ht=self.ht, zt=self.zt)[0]
+        recon_obs = symexp(recon_obs)
 
         # set the state
         # recon = [cos_theta, sin_theta, cos_alpha, sin_alpha]
         # reconstruct theta and alpha from cos and sin
-        theta = np.arctan2(recon[1], recon[0], dtype=np.float32)
-        alpha = np.arctan2(recon[3], recon[2], dtype=np.float32)
-        self._state = np.array([theta, alpha, 0, 0], dtype=np.float32)
+        self._state = np.array([recon_obs[0], recon_obs[1], 0, 0], dtype=np.float32)
 
         # 2. Compute the velocities using the velocity filter
         # if self.vel_filt:
