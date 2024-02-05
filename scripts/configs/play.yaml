@@ -3,5 +3,5 @@ defaults:
   - env: neural_sim
   - wrappers: null
 
-max_act: 0.8
-max_dact: 0.2
+max_act: 1.0
+max_dact: 0.5

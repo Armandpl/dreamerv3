@@ -28,7 +28,8 @@ class FurutaNeuralSim(FurutaBase):
             action_space=gymnasium.spaces.Box(low=-1, high=1, shape=(1,)),
         )
         torch.set_grad_enabled(False)
-        self.rssm.load_state_dict(torch.load(rssm_path))
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.rssm.load_state_dict(torch.load(rssm_path, map_location=device))
 
         self.velocity_filter = velocity_filter
         self._init_vel_filt()
@@ -55,7 +56,8 @@ class FurutaNeuralSim(FurutaBase):
         ).unsqueeze(0)
 
         self.ht = self.rssm.recurrent_model(ht_minus_1=h0, zt_minus_1=z0, a=a0)
-        self.zt, _ = self.rssm.representation_model(x=rssm_obs, ht_minus_1=h0)
+        zt_dist, _ = self.rssm.representation_model(x=rssm_obs, ht_minus_1=h0)
+        self.zt = zt_dist.sample()
 
     def _update_state(self, a):
         # update the simulation state
@@ -64,7 +66,7 @@ class FurutaNeuralSim(FurutaBase):
         self.ht = self.rssm.recurrent_model(ht_minus_1=self.ht, zt_minus_1=self.zt, a=a)
         # predict zt_hat from ht
         zt_dist, _ = self.rssm.transition_model(self.ht)
-        self.zt = zt_dist.sample()
+        self.zt = zt_dist.mode()
 
         # concat zt_hat and ht, reconstruct obs
         recon_obs = self.rssm.decoder(ht=self.ht, zt=self.zt)[0]
