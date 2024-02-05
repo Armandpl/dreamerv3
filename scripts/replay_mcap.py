@@ -5,7 +5,7 @@ from furuta.rl.envs.furuta_sim import FurutaSim
 from mcap_protobuf.reader import read_protobuf_messages
 
 if __name__ == "__main__":
-    mcap_path = "../data/mcap/sim/ep2_20240203-155438.mcap"
+    mcap_path = "../data/sim_mcap_dataset/ep241_20240204-160511.mcap"
 
     # TODO get dt from the mcap file
     dt = 0.02
