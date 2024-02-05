@@ -1,10 +1,31 @@
 import gymnasium
 import torch
 from torch import nn
-from torchrl.modules import OneHotCategorical
+# from torch.distributions import OneHotCategoricalStraightThrough
+from minidream.dist import OneHotDist as OneHotCategoricalStraightThrough
 
-DETERMINISTIC_STATE_SIZE = 128
+GRU_RECCURENT_UNITS = 256
+DENSE_HIDDEN_UNITS = 256
+NLP_NB_LAYERS = 1
 STOCHASTIC_STATE_SIZE = 32
+
+
+def symlog(x):
+    return torch.sign(x) * torch.log(torch.abs(x) + 1.0)
+
+
+def symexp(x):
+    return torch.sign(x) * (torch.exp(torch.abs(x)) - 1.0)
+
+
+# def make_mlp(input_dim, output_dim, nb_layers=NLP_NB_LAYERS, hidden_dim=DENSE_HIDDEN_UNITS):
+#     layers = []
+#     for i in range(nb_layers):
+#         layers.append(nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim))
+#         layers.append(nn.LayerNorm(hidden_dim))
+#         layers.append(nn.SiLU())
+#     layers.append(nn.Linear(hidden_dim, output_dim))
+#     return nn.Sequential(*layers)
 
 
 class RSSM(nn.Module):
@@ -14,33 +35,26 @@ class RSSM(nn.Module):
         super().__init__()
         self.representation_model = RepresentationModel(
             observation_space=observation_space,
-            deterministic_state_size=DETERMINISTIC_STATE_SIZE,
-            stochastic_state_size=STOCHASTIC_STATE_SIZE,
         )
         self.recurrent_model = RecurrentModel(
-            determinstic_state_size=DETERMINISTIC_STATE_SIZE,
-            stochastic_state_size=STOCHASTIC_STATE_SIZE,
             action_space=action_space,
         )
-        self.transition_model = TransitionModel(
-            determinstic_state_size=DETERMINISTIC_STATE_SIZE,
-            stochastic_state_size=STOCHASTIC_STATE_SIZE,
-        )
+        self.transition_model = TransitionModel()
         self.decoder = Decoder(
-            stochastic_state_size=STOCHASTIC_STATE_SIZE,
-            deterministic_state_size=DETERMINISTIC_STATE_SIZE,
             observation_space=observation_space,
         )
-        # self.reward_model = RewardModel(deterministic_state_size=DETERMINISTIC_STATE_SIZE, stochastic_state_size=STOCHASTIC_STATE_SIZE)
+        self.reward_model = RewardModel()
         # self.continue_model
 
-    def step(self, x, a, ht_minus_1, zt_minus_1):
-        ht = self.recurrent_model(ht_minus_1, zt_minus_1, a)
-        zt, posterior_logits = self.representation_model(x, ht)
+    def step(self, x, at_minus_1, ht_minus_1, zt_minus_1):
+        ht = self.recurrent_model(ht_minus_1, zt_minus_1, at_minus_1)
+        zt_dist, posterior_logits = self.representation_model(x, ht)
+        zt = zt_dist.sample()
         x_hat = self.decoder(ht, zt)
-        zt_hat, priors_logits = self.transition_model(ht)
+        _, priors_logits = self.transition_model(ht)
+        rew = self.reward_model(ht, zt)
 
-        return x_hat, zt_hat, priors_logits, ht, zt, posterior_logits
+        return x_hat, priors_logits, ht, zt, posterior_logits, rew
 
     def imagine(self):
         pass
@@ -52,26 +66,26 @@ class RepresentationModel(nn.Module):
     def __init__(
         self,
         observation_space: gymnasium.spaces.Box,
-        deterministic_state_size: int,
-        stochastic_state_size: int,
     ):
         super().__init__()
-        self.stochastic_state_size = stochastic_state_size
 
         self.net = nn.Sequential(
-            nn.Linear(observation_space.shape[0] + deterministic_state_size, 128),
-            nn.ELU(),
-            nn.Linear(128, 128),
-            nn.ELU(),
-            nn.Linear(128, stochastic_state_size * stochastic_state_size),
+            nn.Linear(observation_space.shape[0] + GRU_RECCURENT_UNITS, DENSE_HIDDEN_UNITS),
+            nn.LayerNorm(DENSE_HIDDEN_UNITS),
+            nn.SiLU(),
+            nn.Linear(DENSE_HIDDEN_UNITS, DENSE_HIDDEN_UNITS),
+            nn.LayerNorm(DENSE_HIDDEN_UNITS),
+            nn.SiLU(),
+            nn.Linear(DENSE_HIDDEN_UNITS, STOCHASTIC_STATE_SIZE**2),
         )
 
     def forward(self, x, ht_minus_1):
+        x = symlog(x)
         logits = self.net(torch.cat([x, ht_minus_1], dim=-1))
-        zt = OneHotCategorical(
-            logits=logits.view(x.shape[0], self.stochastic_state_size, self.stochastic_state_size)
-        ).sample()
-        return zt, logits
+        zt_dist = OneHotCategoricalStraightThrough(
+            logits=logits.view(x.shape[0], STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE)
+        )
+        return zt_dist, logits
 
 
 class RecurrentModel(nn.Module):
@@ -80,17 +94,17 @@ class RecurrentModel(nn.Module):
 
     def __init__(
         self,
-        determinstic_state_size: int,
-        stochastic_state_size: int,
         action_space: gymnasium.spaces.Box,
     ):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(stochastic_state_size**2 + action_space.shape[0], 128), nn.ELU()
+            nn.Linear(STOCHASTIC_STATE_SIZE**2 + action_space.shape[0], GRU_RECCURENT_UNITS), 
+            nn.LayerNorm(GRU_RECCURENT_UNITS),
+            nn.SiLU(),
         )
         self.GRU = nn.GRU(
-            input_size=128,
-            hidden_size=determinstic_state_size,
+            input_size=GRU_RECCURENT_UNITS,
+            hidden_size=GRU_RECCURENT_UNITS,
             batch_first=True,
         )
 
@@ -114,27 +128,23 @@ class TransitionModel(nn.Module):
 
     def __init__(
         self,
-        determinstic_state_size: int,
-        stochastic_state_size: int,
     ):
         super().__init__()
 
-        self.stochastic_state_size = stochastic_state_size
-
         self.net = nn.Sequential(
-            nn.Linear(determinstic_state_size, 128),
+            nn.Linear(GRU_RECCURENT_UNITS, DENSE_HIDDEN_UNITS),
             nn.ELU(),
-            nn.Linear(128, 128),
+            nn.Linear(DENSE_HIDDEN_UNITS, DENSE_HIDDEN_UNITS),
             nn.ELU(),
-            nn.Linear(128, stochastic_state_size * stochastic_state_size),
+            nn.Linear(DENSE_HIDDEN_UNITS, STOCHASTIC_STATE_SIZE**2),
         )
 
     def forward(self, x):
         logits = self.net(x)
-        zt = OneHotCategorical(
-            logits=logits.view(x.shape[0], self.stochastic_state_size, self.stochastic_state_size)
-        ).sample()
-        return zt, logits
+        zt_dist = OneHotCategoricalStraightThrough(
+            logits=logits.view(x.shape[0], STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE)
+        )
+        return zt_dist, logits
 
 
 class Decoder(nn.Module):
@@ -142,19 +152,19 @@ class Decoder(nn.Module):
 
     def __init__(
         self,
-        stochastic_state_size: int,
-        deterministic_state_size: int,
         observation_space: gymnasium.spaces.Box,
     ):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(
-                stochastic_state_size * stochastic_state_size + deterministic_state_size, 128
+                STOCHASTIC_STATE_SIZE**2 + GRU_RECCURENT_UNITS, DENSE_HIDDEN_UNITS
             ),
-            nn.ELU(),
-            nn.Linear(128, 128),
-            nn.ELU(),
-            nn.Linear(128, observation_space.shape[0]),
+            nn.LayerNorm(DENSE_HIDDEN_UNITS),
+            nn.SiLU(),
+            nn.Linear(DENSE_HIDDEN_UNITS, DENSE_HIDDEN_UNITS),
+            nn.LayerNorm(DENSE_HIDDEN_UNITS),
+            nn.SiLU(),
+            nn.Linear(DENSE_HIDDEN_UNITS, observation_space.shape[0]),
         )
 
     # TODO comment shapes everywhere
@@ -170,20 +180,21 @@ class RewardModel(nn.Module):
 
     def __init__(
         self,
-        deterministic_state_size: int,
-        stochastic_state_size: int,
     ):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(
-                stochastic_state_size * stochastic_state_size + deterministic_state_size, 128
+                STOCHASTIC_STATE_SIZE**2 + GRU_RECCURENT_UNITS, DENSE_HIDDEN_UNITS
             ),
-            nn.ELU(),
-            nn.Linear(128, 128),
-            nn.ELU(),
-            nn.Linear(128, 1),
+            nn.LayerNorm(DENSE_HIDDEN_UNITS),
+            nn.SiLU(),
+            nn.Linear(DENSE_HIDDEN_UNITS, DENSE_HIDDEN_UNITS),
+            nn.LayerNorm(DENSE_HIDDEN_UNITS),
+            nn.SiLU(),
+            nn.Linear(DENSE_HIDDEN_UNITS, 1),
         )
 
     def forward(self, ht, zt):
+        zt = zt.view(zt.shape[0], -1)  # flatten
         r = self.net(torch.cat([ht, zt], dim=-1))
         return r

@@ -1,7 +1,10 @@
 data_dir: "../data/sim_mcap_dataset"
-seq_len: 50
-batch_size: 50
-iterations: 50
+seq_len: 64
+batch_size: 16
+iterations: 500
 lr: 2e-4
-kl_balancing_alpha: 0.8
-beta: 1.0 # 1.0 for continous control, 0.1 for atari
+# kl_balancing_alpha: 0.8
+# beta: 1.0 # 1.0 for continous control, 0.1 for atari
+beta_pred: 1.0
+beta_dyn: 0.5
+beta_rep: 0.1
