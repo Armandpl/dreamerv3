@@ -16,12 +16,7 @@ from tqdm import tqdm, trange
 from minidream.dist import OneHotDist as OneHotCategoricalStraightThrough
 from minidream.dist import TwoHotEncodingDistribution
 from minidream.functional import symlog
-from minidream.rssm import (
-    DENSE_HIDDEN_UNITS,
-    GRU_RECCURENT_UNITS,
-    RSSM,
-    STOCHASTIC_STATE_SIZE,
-)
+from minidream.networks import GRU_RECCURENT_UNITS, RSSM, STOCHASTIC_STATE_SIZE
 
 # TODO use autocast fp16?
 
@@ -89,6 +84,8 @@ def main(cfg: DictConfig):
     ).to(device)
     opt = torch.optim.Adam(world_model.parameters(), lr=cfg.lr, weight_decay=0.0)
 
+    print(f"world model nb params: {sum(p.numel() for p in world_model.parameters())}")
+
     recon_losses = []
     kl_losses = []
 
@@ -138,7 +135,7 @@ def main(cfg: DictConfig):
                 zt_minus_1,
                 posteriors_logit,
                 pred_r,
-            ) = world_model.step(data["obs"][:, i], at_minus_1, ht_minus_1, zt_minus_1)
+            ) = world_model.forward(data["obs"][:, i], at_minus_1, ht_minus_1, zt_minus_1)
             # recurrent_states[:, i] = ht_minus_1
             reconstructed_obs[:, i] = x_hat
             posteriors[:, i] = zt_minus_1
@@ -203,7 +200,6 @@ def main(cfg: DictConfig):
 
         loss = cfg.beta_pred * loss_pred + cfg.beta_dyn * loss_dyn + cfg.beta_rep * loss_rep
         loss.backward()
-        print(loss_pred.item())
         recon_losses.append(loss_pred.detach().item())
         kl_losses.append(loss_dyn.detach().item() + loss_rep.detach().item())
 
