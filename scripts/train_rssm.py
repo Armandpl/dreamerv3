@@ -9,12 +9,18 @@ from mcap_protobuf.reader import read_protobuf_messages
 from omegaconf import DictConfig
 from tensordict import TensorDict
 from torch.distributions import Independent
-from minidream.dist import OneHotDist as OneHotCategoricalStraightThrough
 from torch.distributions.kl import kl_divergence
 from torchrl.data import LazyTensorStorage, ReplayBuffer, TensorStorage
 from tqdm import tqdm, trange
 
-from minidream.rssm import RSSM, symlog, DENSE_HIDDEN_UNITS, GRU_RECCURENT_UNITS, STOCHASTIC_STATE_SIZE
+from minidream.dist import OneHotDist as OneHotCategoricalStraightThrough
+from minidream.rssm import (
+    DENSE_HIDDEN_UNITS,
+    GRU_RECCURENT_UNITS,
+    RSSM,
+    STOCHASTIC_STATE_SIZE,
+    symlog,
+)
 
 # TODO use autocast fp16?
 
@@ -49,10 +55,10 @@ def main(cfg: DictConfig):
                     replay_buffer.extend(
                         TensorDict(
                             {
-                                "obs": torch.stack(
-                                    [thetas, alphas], dim=-1
-                                ).unsqueeze(0),
-                                "action": torch.tensor(actions).view(-1, 1).unsqueeze(0), # at_minus_1,
+                                "obs": torch.stack([thetas, alphas], dim=-1).unsqueeze(0),
+                                "action": torch.tensor(actions)
+                                .view(-1, 1)
+                                .unsqueeze(0),  # at_minus_1,
                                 "reward": torch.tensor(rewards).view(-1, 1).unsqueeze(0),
                             },
                             batch_size=[1, cfg.seq_len],
@@ -86,7 +92,6 @@ def main(cfg: DictConfig):
     kl_losses = []
 
     for i in trange(cfg.iterations):
-        print(f"Training iteration {i}")
         data = replay_buffer.sample(cfg.batch_size).to(device)
 
         # prepare tensor to hold the ouputs
@@ -94,22 +99,45 @@ def main(cfg: DictConfig):
         # recurrent_states = torch.zeros(cfg.batch_size, cfg.seq_len, 128, device=device)
 
         # initialize all the tensor to collect priors and posteriors states with their associated logits
-        priors_logits = torch.empty(cfg.batch_size, cfg.seq_len, STOCHASTIC_STATE_SIZE**2, device=device)
-        posteriors = torch.empty(cfg.batch_size, cfg.seq_len, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device)
-        posteriors_logits = torch.empty(cfg.batch_size, cfg.seq_len, STOCHASTIC_STATE_SIZE**2, device=device)
+        priors_logits = torch.empty(
+            cfg.batch_size, cfg.seq_len, STOCHASTIC_STATE_SIZE**2, device=device
+        )
+        posteriors = torch.empty(
+            cfg.batch_size,
+            cfg.seq_len,
+            STOCHASTIC_STATE_SIZE,
+            STOCHASTIC_STATE_SIZE,
+            device=device,
+        )
+        posteriors_logits = torch.empty(
+            cfg.batch_size, cfg.seq_len, STOCHASTIC_STATE_SIZE**2, device=device
+        )
 
-        reconstructed_obs = torch.empty(cfg.batch_size, cfg.seq_len, obs_space.shape[0], device=device)
+        reconstructed_obs = torch.empty(
+            cfg.batch_size, cfg.seq_len, obs_space.shape[0], device=device
+        )
         pred_rewards = torch.empty(cfg.batch_size, cfg.seq_len, 1, device=device)
 
         # init first recurrent state and posterior state
         ht_minus_1 = torch.zeros(cfg.batch_size, GRU_RECCURENT_UNITS, device=device)
-        zt_minus_1 = torch.zeros(cfg.batch_size, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device)
+        zt_minus_1 = torch.zeros(
+            cfg.batch_size, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device
+        )
 
         # compute recurrent states
         for i in range(cfg.seq_len):
-            x_hat, priors_logit, ht_minus_1, zt_minus_1, posteriors_logit, pred_r = world_model.step(
-                data["obs"][:, i], data["action"][:, i], ht_minus_1, zt_minus_1
-            )
+            if i == 0:
+                at_minus_1 = torch.zeros(cfg.batch_size, 1, device=device)
+            else:
+                at_minus_1 = data["action"][:, i]
+            (
+                x_hat,
+                priors_logit,
+                ht_minus_1,
+                zt_minus_1,
+                posteriors_logit,
+                pred_r,
+            ) = world_model.step(data["obs"][:, i], at_minus_1, ht_minus_1, zt_minus_1)
             # recurrent_states[:, i] = ht_minus_1
             reconstructed_obs[:, i] = x_hat
             posteriors[:, i] = zt_minus_1
@@ -117,8 +145,12 @@ def main(cfg: DictConfig):
             priors_logits[:, i] = priors_logit
             pred_rewards[:, i] = pred_r
 
-        priors_logits = priors_logits.view(cfg.batch_size, cfg.seq_len, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE)
-        posteriors_logits = posteriors_logits.view(cfg.batch_size, cfg.seq_len, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE)
+        priors_logits = priors_logits.view(
+            cfg.batch_size, cfg.seq_len, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE
+        )
+        posteriors_logits = posteriors_logits.view(
+            cfg.batch_size, cfg.seq_len, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE
+        )
 
         opt.zero_grad()
 
@@ -132,11 +164,11 @@ def main(cfg: DictConfig):
         #     .log_prob(symlog(data["obs"]))
         #     .mean()
         # )
-        distance = (reconstructed_obs - symlog(data["obs"]))**2
+        distance = (reconstructed_obs - symlog(data["obs"])) ** 2
         distance = torch.where(distance < 1e-8, 0, distance)
         recon_loss = distance.mean()
 
-        # rew_loss = ( 
+        # rew_loss = (
         #     -Independent(
         #         torch.distributions.Normal(loc=pred_rewards, scale=1.0),
         #         len(pred_rewards.shape[2:]),
@@ -144,29 +176,32 @@ def main(cfg: DictConfig):
         #     .log_prob(data["reward"])
         #     .mean()
         # )
-        loss_pred = recon_loss # + rew_loss
+        loss_pred = recon_loss  # + rew_loss
 
         # kl loss
+        free_nats = torch.tensor([1], device=device)
         loss_dyn = torch.max(
-            torch.tensor([1], device=device), # free nats
+            free_nats,
             kl_divergence(
-                Independent(OneHotCategoricalStraightThrough(logits=posteriors_logits.detach()), 1),
+                Independent(
+                    OneHotCategoricalStraightThrough(logits=posteriors_logits.detach()), 1
+                ),
                 Independent(OneHotCategoricalStraightThrough(logits=priors_logits), 1),
-            ).mean()
+            ).mean(),
         )
         loss_rep = torch.max(
-            torch.tensor([1], device=device), # free nats
+            free_nats,
             kl_divergence(
-                Independent( # independant is so that each batch is independant
+                Independent(  # independant is so that each batch is independant
                     OneHotCategoricalStraightThrough(logits=posteriors_logits), 1
                 ),
                 Independent(OneHotCategoricalStraightThrough(logits=priors_logits.detach()), 1),
-            ).mean()
+            ).mean(),
         )
-        
+
         loss = cfg.beta_pred * loss_pred + cfg.beta_dyn * loss_dyn + cfg.beta_rep * loss_rep
         loss.backward()
-        print(loss.item())
+        print(loss_pred.item())
         recon_losses.append(loss_pred.detach().item())
         kl_losses.append(loss_dyn.detach().item() + loss_rep.detach().item())
 
@@ -175,16 +210,17 @@ def main(cfg: DictConfig):
 
     fig, ax = plt.subplots(2, 1, figsize=(8, 6))
 
-    ax[0].plot(kl_losses, label='KL Loss')
-    ax[0].set_ylabel('Loss')
+    ax[0].plot(kl_losses, label="KL Loss")
+    ax[0].set_ylabel("Loss")
     ax[0].legend()
 
-    ax[1].plot(recon_losses, label='Reconstruction Loss')
-    ax[1].set_xlabel('Iteration')
-    ax[1].set_ylabel('Loss')
+    ax[1].plot(recon_losses, label="Reconstruction Loss")
+    ax[1].set_xlabel("Iteration")
+    ax[1].set_ylabel("Loss")
     ax[1].legend()
+    ax[1].set_ylim(top=0.2)
 
-    plt.savefig('plot.jpg')
+    plt.savefig("plot.jpg")
     # save model for use with play_robot.py!
     # TODO use safetensors
     torch.save(world_model.state_dict(), "../data/rssm.pth")
