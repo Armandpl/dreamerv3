@@ -1,0 +1,7 @@
+defaults:
+  - _self_
+  - env: neural_sim
+  - wrappers: null
+
+max_act: 1.0
+max_dact: 0.5

@@ -6,7 +6,7 @@ authors = ["Your Name <you@example.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = ">=3.9"
+python = ">=3.9, <4.0"
 pre-commit = "^3.6.0"
 tinygrad = {git = "https://github.com/tinygrad/tinygrad.git"}
 ipykernel = "^6.29.0"
@@ -16,6 +16,11 @@ torchvision = "^0.16.2"
 wandb = "^0.16.2"
 einops = "^0.7.0"
 gymnasium = "^0.29.1"
+furuta = {git = "https://github.com/Armandpl/furuta"}
+hydra-core = "^1.3.2"
+pygame = "^2.5.2"
+torchrl = "^0.3.0"
+matplotlib = "^3.8.2"
 
 
 [build-system]

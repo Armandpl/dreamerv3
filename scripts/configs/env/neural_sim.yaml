@@ -1,0 +1,8 @@
+_target_: minidream.furuta_neural_sim.FurutaNeuralSim
+rssm_path: "../data/rssm.pth"
+control_freq: 50
+reward: "cos_alpha"
+angle_limits: [400, 400] # can do 5 turns around theta, and 4 around alpha
+speed_limits: [400, 400]
+velocity_filter: 2
+render_mode: "rgb_array"
