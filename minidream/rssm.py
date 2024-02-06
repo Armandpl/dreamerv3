@@ -1,6 +1,7 @@
 import gymnasium
 import torch
 from torch import nn
+
 # from torch.distributions import OneHotCategoricalStraightThrough
 from minidream.dist import OneHotDist as OneHotCategoricalStraightThrough
 
@@ -61,7 +62,7 @@ class RSSM(nn.Module):
 
 
 class RepresentationModel(nn.Module):
-    """Encode the observation x + deterministic state into the stochastic state zt."""
+    """Encode the observation x + deterministic state ht into the stochastic state zt."""
 
     def __init__(
         self,
@@ -98,7 +99,7 @@ class RecurrentModel(nn.Module):
     ):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(STOCHASTIC_STATE_SIZE**2 + action_space.shape[0], GRU_RECCURENT_UNITS), 
+            nn.Linear(STOCHASTIC_STATE_SIZE**2 + action_space.shape[0], GRU_RECCURENT_UNITS),
             nn.LayerNorm(GRU_RECCURENT_UNITS),
             nn.SiLU(),
         )
@@ -133,9 +134,11 @@ class TransitionModel(nn.Module):
 
         self.net = nn.Sequential(
             nn.Linear(GRU_RECCURENT_UNITS, DENSE_HIDDEN_UNITS),
-            nn.ELU(),
+            nn.LayerNorm(DENSE_HIDDEN_UNITS),
+            nn.SiLU(),
             nn.Linear(DENSE_HIDDEN_UNITS, DENSE_HIDDEN_UNITS),
-            nn.ELU(),
+            nn.LayerNorm(DENSE_HIDDEN_UNITS),
+            nn.SiLU(),
             nn.Linear(DENSE_HIDDEN_UNITS, STOCHASTIC_STATE_SIZE**2),
         )
 
@@ -156,9 +159,7 @@ class Decoder(nn.Module):
     ):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(
-                STOCHASTIC_STATE_SIZE**2 + GRU_RECCURENT_UNITS, DENSE_HIDDEN_UNITS
-            ),
+            nn.Linear(STOCHASTIC_STATE_SIZE**2 + GRU_RECCURENT_UNITS, DENSE_HIDDEN_UNITS),
             nn.LayerNorm(DENSE_HIDDEN_UNITS),
             nn.SiLU(),
             nn.Linear(DENSE_HIDDEN_UNITS, DENSE_HIDDEN_UNITS),
@@ -183,9 +184,7 @@ class RewardModel(nn.Module):
     ):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(
-                STOCHASTIC_STATE_SIZE**2 + GRU_RECCURENT_UNITS, DENSE_HIDDEN_UNITS
-            ),
+            nn.Linear(STOCHASTIC_STATE_SIZE**2 + GRU_RECCURENT_UNITS, DENSE_HIDDEN_UNITS),
             nn.LayerNorm(DENSE_HIDDEN_UNITS),
             nn.SiLU(),
             nn.Linear(DENSE_HIDDEN_UNITS, DENSE_HIDDEN_UNITS),
