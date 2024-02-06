@@ -4,19 +4,12 @@ from torch import nn
 
 # from torch.distributions import OneHotCategoricalStraightThrough
 from minidream.dist import OneHotDist as OneHotCategoricalStraightThrough
+from minidream.functional import symexp, symlog
 
 GRU_RECCURENT_UNITS = 256
 DENSE_HIDDEN_UNITS = 256
 NLP_NB_LAYERS = 1
 STOCHASTIC_STATE_SIZE = 32
-
-
-def symlog(x):
-    return torch.sign(x) * torch.log(torch.abs(x) + 1.0)
-
-
-def symexp(x):
-    return torch.sign(x) * (torch.exp(torch.abs(x)) - 1.0)
 
 
 # def make_mlp(input_dim, output_dim, nb_layers=NLP_NB_LAYERS, hidden_dim=DENSE_HIDDEN_UNITS):

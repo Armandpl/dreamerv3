@@ -14,12 +14,13 @@ from torchrl.data import LazyTensorStorage, ReplayBuffer, TensorStorage
 from tqdm import tqdm, trange
 
 from minidream.dist import OneHotDist as OneHotCategoricalStraightThrough
+from minidream.dist import TwoHotEncodingDistribution
+from minidream.functional import symlog
 from minidream.rssm import (
     DENSE_HIDDEN_UNITS,
     GRU_RECCURENT_UNITS,
     RSSM,
     STOCHASTIC_STATE_SIZE,
-    symlog,
 )
 
 # TODO use autocast fp16?
@@ -166,7 +167,7 @@ def main(cfg: DictConfig):
         # )
         distance = (reconstructed_obs - symlog(data["obs"])) ** 2
         distance = torch.where(distance < 1e-8, 0, distance)
-        recon_loss = distance.mean()
+        recon_loss = distance.sum(dim=[-1])
 
         # rew_loss = (
         #     -Independent(
@@ -176,7 +177,8 @@ def main(cfg: DictConfig):
         #     .log_prob(data["reward"])
         #     .mean()
         # )
-        loss_pred = recon_loss  # + rew_loss
+        rew_loss = TwoHotEncodingDistribution(pred_rewards, dims=1).log_prob(data["reward"])
+        loss_pred = (recon_loss + rew_loss).mean()
 
         # kl loss
         free_nats = torch.tensor([1], device=device)
