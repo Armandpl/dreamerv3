@@ -26,6 +26,8 @@ class RSSM(nn.Module):
         self, observation_space: gymnasium.spaces.Box, action_space: gymnasium.spaces.Box
     ):
         super().__init__()
+        self.observation_space = observation_space
+        self.action_space = action_space
         self.representation_model = RepresentationModel(
             observation_space=observation_space,
         )
@@ -36,8 +38,8 @@ class RSSM(nn.Module):
         self.decoder = Decoder(
             observation_space=observation_space,
         )
-        self.reward_model = RewardModel()
-        # self.continue_model
+        self.reward_model = PredModel(1)
+        self.continue_model = PredModel(1)
 
     def forward(
         self,
@@ -51,9 +53,10 @@ class RSSM(nn.Module):
         zt = zt_dist.sample()  # (B, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE)
         x_hat = self.decoder(ht, zt)  # (B, obs_dim)
         _, priors_logits = self.transition_model(ht)
-        rew = self.reward_model(ht, zt)  # (B, 1)
+        r = self.reward_model(ht, zt)  # (B, 1)
+        c = self.continue_model(ht, zt)  # (B, 1)
 
-        return x_hat, priors_logits, ht, zt, posterior_logits, rew
+        return x_hat, priors_logits, ht, zt, posterior_logits, r, c
 
     def imagine(self):
         pass
@@ -155,21 +158,19 @@ class Decoder(nn.Module):
         return self.net(torch.cat([ht, zt], dim=-1))
 
 
-class RewardModel(nn.Module):
+class PredModel(nn.Module):
     """
-    Reward Model: estimate rewards from the latent state (ht + zt)
+    Pred Model: mlp from the latent state
+    used for the actor, the critic, the reward and continue predictor
     """
 
-    def __init__(
-        self,
-    ):
+    def __init__(self, out_dim: int):
         super().__init__()
         self.net = make_mlp(
             input_dim=STOCHASTIC_STATE_SIZE**2 + GRU_RECCURENT_UNITS,
-            output_dim=1,
+            output_dim=out_dim,
         )
 
     def forward(self, ht, zt):
         zt = zt.view(zt.shape[0], -1)  # flatten
-        r = self.net(torch.cat([ht, zt], dim=-1))
-        return r
+        return self.net(torch.cat([ht, zt], dim=-1))
