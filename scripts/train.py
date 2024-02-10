@@ -30,11 +30,11 @@ from minidream.rb import ReplayBuffer
 # These are the SACRED hyper-parameters
 # Change them at your OWN RISK (don't)
 # Actor Critic HPs
-GAMMA = 0.997
+GAMMA = 0.997  # == 1 - 1/333
 IMAGINE_HORIZON = 15
 RETURN_LAMBDA = 0.95
 ACTOR_ENTROPY = 3e-4
-ACTOR_CRITIC_LR = 3e-5
+ACTOR_CRITIC_LR = 3e-4
 ADAM_EPSILON = 1e-5
 GRADIENT_CLIP = 100.0
 
@@ -378,7 +378,8 @@ def collect_rollout(
                 )
                 zt_minus_1 = zt_dist.mode()  # TODO make mode method on all dists #sample()
 
-            replay_buffer.add(act, obs, reward, terminated, first)
+            if replay_buffer is not None:
+                replay_buffer.add(act, obs, reward, terminated, first)
             first = False
             done = terminated or truncated
         print(f"Episode return: {episode_return}")
@@ -460,6 +461,8 @@ def main(cfg: DictConfig):
     # run.finish()
 
     # save models
+    torch.save(world_model.state_dict(), "../data/world_model.pth")
+    torch.save(actor.state_dict(), "../data/actor.pth")
     # TODO write inference script
 
 
