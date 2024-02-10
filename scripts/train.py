@@ -336,7 +336,7 @@ def train_actor_critic(
     ]  # again discard last action bc we bootstrap
     actor_loss = -logpi * sg(advantage.squeeze(-1))
     actor_loss = actor_loss * traj_weight[:, :-1]
-    # actor_loss -= ACTOR_ENTROPY * policy.entropy()[:, :-1]
+    actor_loss -= ACTOR_ENTROPY * policy.entropy()[:, :-1]
     actor_loss = actor_loss.mean()
     actor_loss.backward()
     actor_opt.step()
