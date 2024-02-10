@@ -142,7 +142,7 @@ def train_step_world_model(data, world_model, optim):
 
     # TODO how is that working?? we should have more logits at the output of the reward net
     # also it needs to be initialized with zero weights for the output layer i think?
-    rew_loss = TwoHotEncodingDistribution(pred_rewards, dims=1).log_prob(
+    rew_loss = -TwoHotEncodingDistribution(pred_rewards, dims=1).log_prob(
         data["reward"]
     )  # sum over the last dim
     continue_loss = -Independent(
@@ -255,8 +255,10 @@ def train_actor_critic(
 
     # imagine trajectories, starting from sampled data
     # use each step sampled from the env as the start for a new trajectory
-    hts[:, 0] = replayed_hts.view(-1, GRU_RECCURENT_UNITS).detach()
-    zts[:, 0] = replayed_zts.view(-1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE).detach()
+    hts[:, 0] = replayed_hts.view(-1, GRU_RECCURENT_UNITS).detach()  # .contiguous()
+    zts[:, 0] = replayed_zts.view(
+        -1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE
+    ).detach()  # .contiguous()
     ats[:, 0] = actor(hts[:, 0], zts[:, 0]).sample().unsqueeze(1)
 
     with torch.no_grad():  # TODO torch no grad bc we not training the wm?
@@ -330,26 +332,30 @@ def train_actor_critic(
 
 def collect_rollout(env, replay_buffer, actor: Actor = None, rssm: RSSM = None):
     with torch.no_grad():
-        obs = env.reset()
+        obs, _ = env.reset()
         if rssm is not None:
-            ht_minus_1 = torch.zeros(1, GRU_RECCURENT_UNITS, device=rssm.device)
-            zt_minus_1 = rssm.representation_model(torch.tensor(obs).to(rssm.device), ht_minus_1)
+            ht_minus_1 = torch.zeros(1, GRU_RECCURENT_UNITS, device=device)
+            zt_dist, _ = rssm.representation_model(
+                torch.tensor(obs).unsqueeze(0).to(device), ht_minus_1
+            )
+            zt_minus_1 = zt_dist.mode()
         done = False
         first = True
         episode_return = 0
         while not done:
             if actor is not None and rssm is not None:
-                act = actor(ht_minus_1, zt_minus_1).mean
+                act = actor(ht_minus_1, zt_minus_1).mode.unsqueeze(0)
                 ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
-                act = act.squeeze(0).cpu().numpy()
+                # act = act.squeeze(0).item()
             else:
                 act = env.action_space.sample()
-            obs, reward, terminated, truncated, _ = env.step(act.squeeze(0))
+            obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
             episode_return += reward
             if actor is not None and rssm is not None:
-                zt_minus_1 = rssm.representation_model(
-                    torch.tensor(obs).to(rssm.device).unsqueeze(0), ht_minus_1
+                zt_dist, _ = rssm.representation_model(
+                    torch.tensor(obs).to(device).unsqueeze(0), ht_minus_1
                 )
+                zt_minus_1 = zt_dist.mode()  # TODO make mode method on all dists #sample()
 
             replay_buffer.add(act, obs, reward, terminated, first)
             first = False
@@ -392,7 +398,7 @@ def main(cfg: DictConfig):
 
     for _ in trange(cfg.iterations):
         print("Collecting transitions...")
-        collect_rollout(env, replay_buffer, actor)
+        collect_rollout(env, replay_buffer, actor, world_model)
         # TODO put this in a loop and use it for the train ratio?
         data = replay_buffer.sample(cfg.batch_size, cfg.seq_len).to(device)
 
