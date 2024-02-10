@@ -29,6 +29,7 @@ class ReplayBuffer:
         trajectories = []
         for _ in range(batch_size):
             # pick a random index between 0 and len(self.buffer) - seq_len
+            # TODO remove for loop, sample at once from the buffer
             idx = random.randint(0, len(self.actions) - seq_len)
             trajectory = TensorDict(
                 {
