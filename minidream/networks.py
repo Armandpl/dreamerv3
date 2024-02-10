@@ -141,7 +141,9 @@ class RecurrentModel(nn.Module):
         )  # (batch_size, 128)
         mlp_out = mlp_out.unsqueeze(1)  # (batch_size, 1, 128)
         ht_minus_1 = ht_minus_1.unsqueeze(0)  # (1, batch_size, 128)
-        _, ht = self.GRU(mlp_out, ht_minus_1)
+        _, ht = self.GRU(
+            mlp_out, ht_minus_1.contiguous()
+        )  # TODO why do we need to call contiguous?
         ht = ht.squeeze(0)  # (batch_size, 128)
         return ht
 
