@@ -1,0 +1,5 @@
+data_dir: "../data/sim_mcap_dataset"
+seq_len: 64
+batch_size: 16
+iterations: 20
+learning_starts: 5000
