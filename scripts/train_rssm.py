@@ -40,12 +40,16 @@ def main(cfg: DictConfig):
             alphas = []
             actions = []
             rewards = []
+            is_first = []
+            is_first_flag = True
             for msg in read_protobuf_messages(filepath, log_time_order=True):
                 p = msg.proto_msg
                 thetas.append(p.motor_angle)
                 alphas.append(p.pendulum_angle)
                 actions.append(p.action)
                 rewards.append(p.reward)
+                is_first.append(is_first_flag)
+                is_first_flag = False
                 if len(actions) == cfg.seq_len:
                     thetas = torch.tensor(thetas)
                     alphas = torch.tensor(alphas)
@@ -58,6 +62,7 @@ def main(cfg: DictConfig):
                                 .unsqueeze(0),  # at_minus_1,
                                 "reward": torch.tensor(rewards).view(-1, 1).unsqueeze(0),
                                 "done": torch.zeros(len(rewards)).view(-1, 1).unsqueeze(0),
+                                "first": torch.tensor(is_first).view(-1, 1).unsqueeze(0),
                             },
                             batch_size=[1, cfg.seq_len],
                         )
@@ -66,6 +71,7 @@ def main(cfg: DictConfig):
                     alphas = []
                     actions = []
                     rewards = []
+                    is_first = []
         except Exception as e:
             print(f"Error reading {filepath}")
             print(e)
@@ -88,27 +94,21 @@ def main(cfg: DictConfig):
 
     print(f"world model nb params: {sum(p.numel() for p in world_model.parameters())}")
 
-    recon_losses = []
-    kl_losses = []
+    losses = {}
 
     for _ in trange(cfg.iterations):
         data = replay_buffer.sample(cfg.batch_size).to(device)
-        recon_loss, kl_loss = train_step_world_model(data, world_model, opt)
+        _, _, loss_dict = train_step_world_model(data, world_model, opt)
 
-        recon_losses.append(recon_loss.detach().item())
-        kl_losses.append(kl_loss.detach().item())
+        for k, v in loss_dict.items():
+            losses[k] = losses.get(k, [])
+            losses[k].append(v.detach().cpu().item())
 
-    _, ax = plt.subplots(2, 1, figsize=(8, 6))
+    _, ax = plt.subplots(len(losses.keys()), 1, figsize=(8, 6))
 
-    ax[0].plot(kl_losses, label="KL Loss")
-    ax[0].set_ylabel("Loss")
-    ax[0].legend()
-
-    ax[1].plot(recon_losses, label="Reconstruction Loss")
-    ax[1].set_xlabel("Iteration")
-    ax[1].set_ylabel("Loss")
-    ax[1].legend()
-    ax[1].set_ylim(top=0.2)
+    for idx, (k, v) in enumerate(losses.items()):
+        ax[idx].plot(v, label=k)
+        ax[idx].legend()
 
     plt.savefig("plot.jpg")
     # save model for use with play_robot.py!
