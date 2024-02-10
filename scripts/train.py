@@ -1,3 +1,4 @@
+import copy
 from pathlib import Path
 
 import gymnasium
@@ -149,7 +150,7 @@ def train_step_world_model(data, world_model, optim):
         torch.distributions.Bernoulli(logits=pred_continues),
         1,
     ).log_prob(
-        data["done"].float()
+        1.0 - data["done"].float()
     )  # TODO do we need to multiply that by 1.0?
     loss_pred = (recon_loss + rew_loss + continue_loss).mean()  # average accross batch and time
 
@@ -173,9 +174,6 @@ def train_step_world_model(data, world_model, optim):
         ).mean(),
     )
 
-    # TODO log metrics
-    # if logger is not None:
-    # logger.log({}) # TODO something, maybe the logger, should keep track of the global step
     loss = BETA_PRED * loss_pred + BETA_DYN * loss_dyn + BETA_REP * loss_rep
     loss.backward()
 
@@ -235,9 +233,21 @@ def compute_lambda_returns(rewards, values, continues):
 
 
 def train_actor_critic(
-    data, replayed_hts, replayed_zts, world_model, actor, critic, actor_opt, critic_opt
+    data,
+    replayed_hts,
+    replayed_zts,
+    world_model,
+    actor,
+    critic,
+    slow_critic,
+    actor_opt,
+    critic_opt,
 ):
     batch_size, seq_len = data["action"].shape[0:2]
+
+    # update the slow critic by mixing it with the critic
+    for s, d in zip(critic.parameters(), slow_critic.parameters()):
+        d.data = 0.02 * s.data + (1 - 0.02) * d.data
 
     # we need something to hold the trajectories
     # we'll have a new batch_size of old_batch_size * old_seq_len
@@ -289,7 +299,7 @@ def train_actor_critic(
     continues[:, 0] = 1.0 - true_done[:, :1]
 
     with torch.no_grad():
-        discount = 1 - (1 / IMAGINE_HORIZON)
+        discount = 1 - (1 / 333)
         traj_weight = torch.cumprod(discount * continues, dim=1) / discount
         traj_weight = traj_weight.squeeze(-1)
 
@@ -302,9 +312,11 @@ def train_actor_critic(
     critic_opt.zero_grad()
     # TODO re compute the value dist for traj[:, :-1]
     values_dist = critic(hts[:, :-1], zts[:, :-1])
+    slow_values = slow_critic(hts[:, :-1], zts[:, :-1]).mean.detach()
     critic_loss = -values_dist.log_prob(
         sg(lambda_returns)
     )  # symlog and symexp done in the distrib
+    critic_loss -= values_dist.log_prob(slow_values)
     # TODO im confused why do we discount two times???
     # ok so i think the traj weight isnt a discount thing its to stop training after receiving the continue=0 flag
     critic_loss = critic_loss * traj_weight[:, :-1]
@@ -389,6 +401,7 @@ def main(cfg: DictConfig):
     ).to(device)
     actor = Actor(env.action_space).to(device)
     critic = Critic().to(device)
+    slow_critic = copy.deepcopy(critic)
 
     wm_opt = torch.optim.Adam(world_model.parameters(), lr=WM_LR, weight_decay=0.0)
     actor_opt = torch.optim.Adam(
@@ -415,7 +428,7 @@ def main(cfg: DictConfig):
         hts, zts, wm_loss_dict = train_step_world_model(data, world_model, wm_opt)
         print("Training actor and critic...")
         actor_critic_loss_dict = train_actor_critic(
-            data, hts, zts, world_model, actor, critic, actor_opt, critic_opt
+            data, hts, zts, world_model, actor, critic, slow_critic, actor_opt, critic_opt
         )
 
         loss_dict = {**wm_loss_dict, **actor_critic_loss_dict}
