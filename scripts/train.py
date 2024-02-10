@@ -188,8 +188,9 @@ def train_step_world_model(data, world_model, optim):
             "loss/pred": loss_pred,
             "loss/dyn": loss_dyn,
             "loss/rep": loss_rep,
-            # "loss/reward": rew_loss.mean(),
-            # "loss/continue": continue_loss
+            "loss/recon": recon_loss.mean(),
+            "loss/reward": rew_loss.mean(),
+            "loss/continue": continue_loss.mean(),
         },
     )
 
@@ -322,7 +323,8 @@ def train_actor_critic(
         :, :-1
     ]  # again discard last action bc we bootstrap
     actor_loss = -logpi * sg(advantage.squeeze(-1))
-    actor_loss -= ACTOR_ENTROPY * policy.entropy()[:, :-1]
+    actor_loss = actor_loss * traj_weight[:, :-1]
+    # actor_loss -= ACTOR_ENTROPY * policy.entropy()[:, :-1]
     actor_loss = actor_loss.mean()
     actor_loss.backward()
     actor_opt.step()
@@ -330,7 +332,9 @@ def train_actor_critic(
     return {"loss/actor": actor_loss, "loss/critic": critic_loss}
 
 
-def collect_rollout(env, replay_buffer, actor: Actor = None, rssm: RSSM = None):
+def collect_rollout(
+    env, replay_buffer, actor: Actor = None, rssm: RSSM = None, deterministic=False
+):
     with torch.no_grad():
         obs, _ = env.reset()
         if rssm is not None:
@@ -338,13 +342,18 @@ def collect_rollout(env, replay_buffer, actor: Actor = None, rssm: RSSM = None):
             zt_dist, _ = rssm.representation_model(
                 torch.tensor(obs).unsqueeze(0).to(device), ht_minus_1
             )
-            zt_minus_1 = zt_dist.mode()
+            zt_minus_1 = zt_dist.sample()
         done = False
         first = True
         episode_return = 0
         while not done:
             if actor is not None and rssm is not None:
-                act = actor(ht_minus_1, zt_minus_1).mode.unsqueeze(0)
+                act_dist = actor(ht_minus_1, zt_minus_1)
+                if deterministic:
+                    act = act_dist.mode
+                else:
+                    act = act_dist.sample()
+                act = act.unsqueeze(0)
                 ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
                 # act = act.squeeze(0).item()
             else:
@@ -415,6 +424,7 @@ def main(cfg: DictConfig):
             losses[k] = losses.get(k, [])
             losses[k].append(v.detach().cpu().item())
 
+    collect_rollout(env, replay_buffer, actor, world_model, deterministic=True)
     # plot losses and save plot.png
     _, ax = plt.subplots(len(losses.keys()), 1, figsize=(8, 6))
 
