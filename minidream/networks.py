@@ -1,5 +1,6 @@
 import gymnasium
 import torch
+from ema import EMA
 from torch import Tensor, nn
 
 from minidream.dist import OneHotDist as OneHotCategoricalStraightThrough
@@ -32,6 +33,7 @@ class RSSM(nn.Module):
         )
         self.reward_model = PredModel(255, output_zero_init=True)
         self.continue_model = PredModel(1)
+        self.reward_ema = EMA()
 
     def forward(
         self,
@@ -43,6 +45,7 @@ class RSSM(nn.Module):
     ):
         # reset ht_minus_1, zt_minus_1 and action if it's the first step of an episode
         # at_minus_1 = at_minus_1 * (1 - is_first)
+        # TODO is that the proper way to reset the initial state?
         zt_minus_1 = zt_minus_1 * (1 - is_first.unsqueeze(2).float())
         ht_minus_1 = ht_minus_1 * (1 - is_first.float())
 

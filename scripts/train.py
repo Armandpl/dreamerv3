@@ -297,7 +297,7 @@ def train_actor_critic(
     # at least that's what I understand rn
     continues = Independent(
         torch.distributions.Bernoulli(logits=world_model.continue_model(hts, zts)), 1
-    ).mode
+    ).mode  # TODO can we just do > 0.5?
     # make sur we don't use imagined trajectories from terminal states
     # so get the real termination flags for step=0
     true_done = data["done"].view(-1, 1).float()
@@ -316,6 +316,9 @@ def train_actor_critic(
     critic_opt.zero_grad()
     # TODO re compute the value dist for traj[:, :-1]
     values_dist = critic(hts[:, :-1], zts[:, :-1])
+
+    # detach the slow critic bc we don't update its weights with gradient descent
+    # we mix it with the critic and we train the critic to approach the output of the slow critic
     slow_values = slow_critic(hts[:, :-1], zts[:, :-1]).mean.detach()
     critic_loss = -values_dist.log_prob(
         sg(lambda_returns)
@@ -331,7 +334,12 @@ def train_actor_critic(
     # train the actor
     # TODO norm the rewards
     actor_opt.zero_grad()
-    advantage = lambda_returns - values[:, :-1]
+
+    offset, invscale = world_model.reward_ema(pred_rewards)
+    normed_lambda_returns = (lambda_returns - offset) * invscale
+    normed_values = (values[:, :-1] - offset) * invscale
+    advantage = normed_lambda_returns - normed_values
+
     policy = actor(
         sg(hts), sg(zts)
     )  # TODO we've done this computation once already, can we cache it?
@@ -341,6 +349,10 @@ def train_actor_critic(
     actor_loss = -logpi * sg(advantage.squeeze(-1))
     actor_loss = actor_loss * traj_weight[:, :-1]
     actor_loss -= ACTOR_ENTROPY * policy.entropy()[:, :-1]
+    # ignore first action bc it was taken from a non imagine state
+    # don't see it in the official implem but sheeprl blog post for v1 says its crucial
+    # also not sure that's the right way to do it? TODO
+    actor_loss = actor_loss[:, 1:]
     actor_loss = actor_loss.mean()
     actor_loss.backward()
     torch.nn.utils.clip_grad_norm_(actor.parameters(), ACTOR_GRADIENT_CLIP)
@@ -354,6 +366,12 @@ def collect_rollout(
 ):
     with torch.no_grad():
         obs, _ = env.reset()
+        if replay_buffer is not None:
+            # TODO do we actually want that????
+            # in discrete action spaces we can't send a zero action?
+            # and there is no action that actually lead to the first state
+            # so its a bit weird?
+            replay_buffer.add(0, obs, 0, False, True)
         if rssm is not None:
             ht_minus_1 = torch.zeros(1, GRU_RECCURENT_UNITS, device=device)
             zt_dist, _ = rssm.representation_model(
