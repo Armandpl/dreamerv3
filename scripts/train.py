@@ -6,6 +6,7 @@ import hydra
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import wandb
 from omegaconf import DictConfig
 from tensordict import TensorDict
 from torch.distributions import Independent
@@ -407,11 +408,12 @@ def collect_rollout(
                 # replay_buffer.add(act, obs, reward, terminated, first)
                 replay_buffer.add(act, obs, reward, done, first)
         print(f"Episode return: {episode_return}")
+    return episode_return
 
 
 @hydra.main(version_base="1.3", config_path="configs", config_name="train.yaml")
 def main(cfg: DictConfig):
-    # run = wandb.init(project="minidream_dev", job_type="train")
+    run = wandb.init(project="minidream_dev", job_type="train")
     # setup logger
     # TODO
 
@@ -450,7 +452,7 @@ def main(cfg: DictConfig):
 
     for _ in trange(cfg.iterations):
         print("Collecting transitions...")
-        collect_rollout(env, replay_buffer, actor, world_model)
+        episode_return = collect_rollout(env, replay_buffer, actor, world_model)
         # TODO put this in a loop and use it for the train ratio?
         data = replay_buffer.sample(cfg.batch_size, cfg.seq_len).to(device)
 
@@ -463,6 +465,9 @@ def main(cfg: DictConfig):
             )
 
         loss_dict = {**wm_loss_dict, **actor_critic_loss_dict}
+        run.loss(
+            {**loss_dict, "episode_return": episode_return, "global_step": len(replay_buffer)}
+        )
 
         for k, v in loss_dict.items():
             losses[k] = losses.get(k, [])
@@ -478,17 +483,7 @@ def main(cfg: DictConfig):
 
     plt.savefig("plot.jpg")
 
-    # log losses, use len(replay_buffer) as the global step
-    #     run.log({
-    #         "recon_loss": recon_loss,
-    #         "kl_loss": kl_loss,
-    #         "total_wm_loss": recon_loss + kl_loss,
-    #         "actor_loss": actor_loss,
-    #         "critic_loss": critic_loss,
-    #         "global_step": len(replay_buffer),
-    #     })
-
-    # run.finish()
+    run.finish()
 
     # save models
     torch.save(world_model.state_dict(), "../data/world_model.pth")
