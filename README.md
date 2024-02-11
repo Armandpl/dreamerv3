@@ -3,3 +3,4 @@
 - https://github.com/kc-ml2/SimpleDreamer
 - https://github.com/NM512/dreamerv3-torch
 - https://github.com/danijar/dreamerv3
+- https://github.com/jurgisp/pydreamer
