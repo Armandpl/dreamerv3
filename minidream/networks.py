@@ -1,10 +1,10 @@
 import gymnasium
 import torch
-from ema import EMA
 from torch import Tensor, nn
 
 from minidream.dist import OneHotDist as OneHotCategoricalStraightThrough
 from minidream.dist import TwoHotEncodingDistribution
+from minidream.ema import EMA
 from minidream.functional import symlog
 
 GRU_RECCURENT_UNITS = 256

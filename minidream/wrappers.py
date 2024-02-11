@@ -12,12 +12,12 @@ class RescaleObs(gym.Wrapper):
 
     def __init__(self, env: gym.Env):
         super().__init__(env)
-        high, low = self.env.observation_space.high, self.env.observation_space.low
+        self.high, self.low = self.env.observation_space.high, self.env.observation_space.low
 
         # take into account that some limits in the osbservation space can be inf
-        self.high[is_inf(high)] = 1.0
-        self.low[is_inf(low)] = -1.0
-        self.range = high - low
+        self.high[is_inf(self.high)] = 1.0
+        self.low[is_inf(self.low)] = -1.0
+        self.range = self.high - self.low
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
