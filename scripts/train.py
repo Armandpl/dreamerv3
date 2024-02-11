@@ -465,9 +465,7 @@ def main(cfg: DictConfig):
             )
 
         loss_dict = {**wm_loss_dict, **actor_critic_loss_dict}
-        run.loss(
-            {**loss_dict, "episode_return": episode_return, "global_step": len(replay_buffer)}
-        )
+        run.log({**loss_dict, "episode_return": episode_return, "global_step": len(replay_buffer)})
 
         for k, v in loss_dict.items():
             losses[k] = losses.get(k, [])
@@ -481,7 +479,7 @@ def main(cfg: DictConfig):
         ax[idx].plot(v, label=k)
         ax[idx].legend()
 
-    plt.savefig("plot.jpg")
+    plt.savefig("../data/plot.jpg")
 
     run.finish()
 

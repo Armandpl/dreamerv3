@@ -21,6 +21,7 @@ class EMA(torch.nn.Module):
         self.register_buffer("high", torch.zeros((), dtype=torch.float32))
 
     def forward(self, x: torch.Tensor) -> Any:
+        x = x.view(-1)  # flatten bc reward is a tensor of shape (batch_size, 1)
         low = torch.quantile(x, self._percentile_low)
         high = torch.quantile(x, self._percentile_high)
         self.low = self._decay * self.low + (1 - self._decay) * low
