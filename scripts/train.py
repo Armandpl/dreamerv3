@@ -24,6 +24,7 @@ from minidream.networks import (
     Critic,
 )
 from minidream.rb import ReplayBuffer
+from minidream.wrappers import RescaleObs
 
 # TODO use autocast fp16?
 
@@ -34,9 +35,9 @@ GAMMA = 1 - 1 / 333
 IMAGINE_HORIZON = 15
 RETURN_LAMBDA = 0.95
 ACTOR_ENTROPY = 3e-4
-ACTOR_CRITIC_LR = 3e-4
+ACTOR_CRITIC_LR = 3e-5
 ADAM_EPSILON = 1e-5
-GRADIENT_CLIP = 100.0
+ACTOR_GRADIENT_CLIP = 100.0
 
 # Losses
 BETA_PRED = 1.0
@@ -48,8 +49,15 @@ MIN_SYMLOG_DISTANCE = 1e-8
 WM_LR = 1e-4
 WM_ADAM_EPSILON = 1e-8
 
+#
+TRAIN_RATIO = 32  # ratio between real steps and imagined steps
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def count_parameters(model: torch.nn.Module):
+    return sum(p.numel() for p in model.parameters())
 
 
 # TODO use the sg() notation instead of detach??
@@ -137,7 +145,7 @@ def train_step_world_model(data, world_model, optim):
     # compute losses
     # TODO use the validate args arg!! get it from cfg or smth
     # TODO fold that into SymLog loss class? though it's gonna make it less readable maybe?
-    distance = (reconstructed_obs - symlog(data["obs"])) ** 2
+    distance = 0.5 * (reconstructed_obs - symlog(data["obs"])) ** 2
     distance = torch.where(distance < MIN_SYMLOG_DISTANCE, 0, distance)
     recon_loss = distance.sum(dim=[-1])
 
@@ -335,6 +343,7 @@ def train_actor_critic(
     actor_loss -= ACTOR_ENTROPY * policy.entropy()[:, :-1]
     actor_loss = actor_loss.mean()
     actor_loss.backward()
+    torch.nn.utils.clip_grad_norm_(actor.parameters(), ACTOR_GRADIENT_CLIP)
     actor_opt.step()
 
     return {"loss/actor": actor_loss, "loss/critic": critic_loss}
@@ -373,10 +382,12 @@ def collect_rollout(
                 )
                 zt_minus_1 = zt_dist.sample()  # TODO make mode method on all dists #sample()
 
-            if replay_buffer is not None:
-                replay_buffer.add(act, obs, reward, terminated, first)
             first = False
             done = terminated or truncated
+
+            if replay_buffer is not None:
+                # replay_buffer.add(act, obs, reward, terminated, first)
+                replay_buffer.add(act, obs, reward, done, first)
         print(f"Episode return: {episode_return}")
 
 
@@ -388,6 +399,7 @@ def main(cfg: DictConfig):
 
     # setup env
     env = gymnasium.make("CartPole-v1")
+    env = RescaleObs(env)
     replay_buffer = ReplayBuffer()
 
     # setup models and opts
@@ -407,6 +419,10 @@ def main(cfg: DictConfig):
         critic.parameters(), lr=ACTOR_CRITIC_LR, weight_decay=0.0, eps=ADAM_EPSILON
     )
 
+    print(f"world model size: {count_parameters(world_model)/1e6:.2f}M")
+    print(f"actor size: {count_parameters(actor)/1e6:.2f}M")
+    print(f"critic size: {count_parameters(critic)/1e6:.2f}M")
+
     # warm up
     print("Collecting initial transitions")
     while len(replay_buffer) < cfg.learning_starts:
@@ -423,9 +439,10 @@ def main(cfg: DictConfig):
         print("Training world model...")
         hts, zts, wm_loss_dict = train_step_world_model(data, world_model, wm_opt)
         print("Training actor and critic...")
-        actor_critic_loss_dict = train_actor_critic(
-            data, hts, zts, world_model, actor, critic, slow_critic, actor_opt, critic_opt
-        )
+        for _ in range(TRAIN_RATIO // IMAGINE_HORIZON):
+            actor_critic_loss_dict = train_actor_critic(
+                data, hts, zts, world_model, actor, critic, slow_critic, actor_opt, critic_opt
+            )
 
         loss_dict = {**wm_loss_dict, **actor_critic_loss_dict}
 
