@@ -30,7 +30,7 @@ from minidream.rb import ReplayBuffer
 # These are the SACRED hyper-parameters
 # Change them at your OWN RISK (don't)
 # Actor Critic HPs
-GAMMA = 0.997  # == 1 - 1/333
+GAMMA = 1 - 1 / 333
 IMAGINE_HORIZON = 15
 RETURN_LAMBDA = 0.95
 ACTOR_ENTROPY = 3e-4
@@ -214,8 +214,7 @@ def compute_lambda_returns(rewards, values, continues):
     # rt is the reward at t, Vt the output of the critic at t, Ct the output of the continue network at t
     # TODO should we offset the values to get Vt+1? -> YES
     # seems we have to offset continues too? -> yes ofc else it doesn't match the value
-    discount = 1 - 1 / IMAGINE_HORIZON  # TODO what is this vs. GAMMA?
-    interm = rewards[:, :-1] + discount * continues[:, 1:] * values[:, 1:] * (
+    interm = rewards[:, :-1] + GAMMA * continues[:, 1:] * values[:, 1:] * (
         1 - RETURN_LAMBDA
     )  # (B, T, 1)
 
@@ -225,9 +224,7 @@ def compute_lambda_returns(rewards, values, continues):
             Rt_plus_1 = values[:, -1]
         else:
             Rt_plus_1 = lambda_returns[:, t + 1]
-        lambda_returns[:, t] = (
-            interm[:, t] + continues[:, t] * discount * RETURN_LAMBDA * Rt_plus_1
-        )
+        lambda_returns[:, t] = interm[:, t] + continues[:, t] * GAMMA * RETURN_LAMBDA * Rt_plus_1
 
     return lambda_returns
 
@@ -299,8 +296,7 @@ def train_actor_critic(
     continues[:, 0] = 1.0 - true_done[:, :1]
 
     with torch.no_grad():
-        discount = 1 - (1 / 333)
-        traj_weight = torch.cumprod(discount * continues, dim=1) / discount
+        traj_weight = torch.cumprod(GAMMA * continues, dim=1) / GAMMA
         traj_weight = traj_weight.squeeze(-1)
 
     # compute the critic target: bootstrapped lambda return
@@ -367,7 +363,6 @@ def collect_rollout(
                     act = act_dist.sample()
                 act = act.unsqueeze(0)
                 ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
-                # act = act.squeeze(0).item()
             else:
                 act = env.action_space.sample()
             obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
@@ -376,7 +371,7 @@ def collect_rollout(
                 zt_dist, _ = rssm.representation_model(
                     torch.tensor(obs).to(device).unsqueeze(0), ht_minus_1
                 )
-                zt_minus_1 = zt_dist.mode()  # TODO make mode method on all dists #sample()
+                zt_minus_1 = zt_dist.sample()  # TODO make mode method on all dists #sample()
 
             if replay_buffer is not None:
                 replay_buffer.add(act, obs, reward, terminated, first)
