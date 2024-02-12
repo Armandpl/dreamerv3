@@ -48,7 +48,7 @@ WM_GRADIENT_CLIP = 1000.0  # TODO do we have to clip norm or values? nm512 clips
 
 #
 TRAIN_RATIO = 32  # ratio between real steps and imagined steps
-REPLAY_CAPACITY = 1e6  # FIFO
+REPLAY_CAPACITY = 1_000_000  # FIFO
 BATCH_SIZE = 16
 BATCH_LENGTH = 64
 
@@ -351,6 +351,7 @@ def collect_rollout(env, replay_buffer, actor: Actor = None, rssm: RSSM = None):
                 act = act_dist.sample()
                 act = act.unsqueeze(0)
                 ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
+                act = act.cpu()
             else:
                 act = env.action_space.sample()
 
@@ -380,7 +381,7 @@ def main(cfg: DictConfig):
     # setup env
     env = gymnasium.make("CartPole-v1")
     env = RescaleObs(env)
-    replay_buffer = ReplayBuffer()
+    replay_buffer = ReplayBuffer(REPLAY_CAPACITY, env.action_space, env.observation_space)
 
     # setup models and opts
     world_model = RSSM(
@@ -405,14 +406,14 @@ def main(cfg: DictConfig):
 
     # warm up
     print("Collecting initial transitions")
-    while len(replay_buffer) < cfg.learning_starts:
+    while replay_buffer.count < cfg.learning_starts:
         collect_rollout(env, replay_buffer)
 
     losses = {}
 
+    print("Training")
     for _ in trange(cfg.iterations):
         episode_return = collect_rollout(env, replay_buffer, actor, world_model)
-        # TODO put this in a loop and use it for the train ratio?
         data = replay_buffer.sample(cfg.batch_size, cfg.seq_len).to(device)
 
         hts, zts, wm_loss_dict = train_step_world_model(data, world_model, wm_opt)
@@ -424,7 +425,7 @@ def main(cfg: DictConfig):
         loss_dict = {**wm_loss_dict, **actor_critic_loss_dict}
         if not DEBUG:
             run.log(
-                {**loss_dict, "episode_return": episode_return, "global_step": len(replay_buffer)}
+                {**loss_dict, "episode_return": episode_return, "global_step": replay_buffer.count}
             )
 
         for k, v in loss_dict.items():
