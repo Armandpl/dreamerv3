@@ -18,8 +18,8 @@ class ReplayBuffer:
         self.actions.append(action)
         self.obs.append(obs)
         self.rewards.append(reward)
-        self.terminated.append(term)
-        self.firsts.append(first)
+        self.terminated.append(float(term))  # convert bools to floats, useful in the code later
+        self.firsts.append(float(first))
 
     def __len__(self):
         return len(self.actions)
@@ -44,10 +44,10 @@ class ReplayBuffer:
                         self.rewards[idx : idx + seq_len], dtype=torch.float32
                     ).unsqueeze(1),
                     "done": torch.tensor(
-                        self.terminated[idx : idx + seq_len], dtype=torch.bool
+                        self.terminated[idx : idx + seq_len], dtype=torch.float32
                     ).unsqueeze(1),
                     "first": torch.tensor(
-                        self.firsts[idx : idx + seq_len], dtype=torch.bool
+                        self.firsts[idx : idx + seq_len], dtype=torch.float32
                     ).unsqueeze(1),
                 },
                 batch_size=[seq_len],

@@ -1,23 +1,19 @@
 import copy
-from pathlib import Path
 
 import gymnasium
 import hydra
 import matplotlib.pyplot as plt
-import numpy as np
 import torch
-import wandb
 from omegaconf import DictConfig
-from tensordict import TensorDict
 from torch.distributions import Independent
 from torch.distributions.kl import kl_divergence
-from tqdm import tqdm, trange
+from tqdm import trange
 
+import wandb
 from minidream.dist import OneHotDist as OneHotCategoricalStraightThrough
 from minidream.dist import TwoHotEncodingDistribution
 from minidream.functional import symlog
 from minidream.networks import (
-    DENSE_HIDDEN_UNITS,
     GRU_RECCURENT_UNITS,
     RSSM,
     STOCHASTIC_STATE_SIZE,
@@ -25,14 +21,13 @@ from minidream.networks import (
     Critic,
 )
 from minidream.rb import ReplayBuffer
+from minidream.utils import count_parameters, sg
 from minidream.wrappers import RescaleObs
 
-# TODO use autocast fp16?
-DEBUG = True
+DEBUG = False  # wether or not to use wandb
 
-# These are the SACRED hyper-parameters
-# Change them at your OWN RISK (don't)
-# Actor Critic HPs
+# Tuning the HPs = losing, don't
+# Actor Critic
 GAMMA = 1 - 1 / 333
 IMAGINE_HORIZON = 15
 RETURN_LAMBDA = 0.95
@@ -40,42 +35,35 @@ ACTOR_ENTROPY = 3e-4
 ACTOR_CRITIC_LR = 3e-5
 ADAM_EPSILON = 1e-5
 ACTOR_GRADIENT_CLIP = 100.0
+CRITIC_EMA_DECAY = 0.98
 
-# Losses
+# World Model
 BETA_PRED = 1.0
 BETA_DYN = 0.5
 BETA_REP = 0.1
 MIN_SYMLOG_DISTANCE = 1e-8
-
-# World Model
 WM_LR = 1e-4
 WM_ADAM_EPSILON = 1e-8
+WM_GRADIENT_CLIP = 1000.0  # TODO do we have to clip norm or values? nm512 clips norm
 
 #
 TRAIN_RATIO = 32  # ratio between real steps and imagined steps
+REPLAY_CAPACITY = 1e6  # FIFO
+BATCH_SIZE = 16
+BATCH_LENGTH = 64
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def count_parameters(model: torch.nn.Module):
-    return sum(p.numel() for p in model.parameters())
-
-
-# TODO use the sg() notation instead of detach??
-def sg(x):
-    return x.detach()
-
-
 def train_step_world_model(data, world_model, optim):
-    """Train the world model for one step data contains a batch of replay transitions of shape (B,
+    """Train the world model for one step. data contains a batch of replay transitions of shape (B,
     T, ...) it contains past actions, observations, rewards and dones.
 
-    dones = terminated, not terminated or truncated
+    dones = terminated, not terminated or truncated # <-- TODO actually not sure abt that
     """
     batch_size, seq_len = data["obs"].shape[0:2]
     # initialize tensors to collect priors and posteriors states with their associated logits
-    priors_logits = torch.empty(batch_size, seq_len, STOCHASTIC_STATE_SIZE**2, device=device)
     posteriors_logits = torch.empty(batch_size, seq_len, STOCHASTIC_STATE_SIZE**2, device=device)
     posteriors = torch.empty(  # sampled posteriors
         batch_size,
@@ -91,49 +79,31 @@ def train_step_world_model(data, world_model, optim):
         device=device,
     )
 
-    reconstructed_obs = torch.empty(
-        batch_size, seq_len, world_model.observation_space.shape[0], device=device
-    )
-    pred_rewards = torch.empty(batch_size, seq_len, 255, device=device)
-    pred_continues = torch.empty(batch_size, seq_len, 1, device=device)
-
-    # init first recurrent state and posterior state
-    ht_minus_1 = torch.zeros(batch_size, GRU_RECCURENT_UNITS, device=device)
-    zt_minus_1 = torch.zeros(
-        batch_size, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device
-    )
-
     # compute recurrent states
-    # TODO do the preds (reward, continue and reconstruction) outside the loop bc we can and its faster
     for i in range(seq_len):
-        # don't train first step? TODO is that doing the right thing?
-        # TODO should we use a mask instead?
-        # if i == 0:
-        #     at_minus_1 = torch.zeros(batch_size, world_model.action_space.n, device=device)
-        # else:
-        at_minus_1 = data["action"][:, i]
+        if i == 0:
+            at_minus_1 = torch.zeros(batch_size, 1, device=device)
+            ht_minus_1 = torch.zeros(batch_size, GRU_RECCURENT_UNITS, device=device)
+            zt_minus_1 = torch.zeros(
+                batch_size, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device
+            )
+        else:
+            at_minus_1 = data["action"][:, i].view(
+                batch_size, 1
+            )  # action isn't one hot encoded in the rb
+            ht_minus_1 = recurrent_states[:, i - 1].view(batch_size, GRU_RECCURENT_UNITS)
+            zt_minus_1 = posteriors[:, i - 1].view(
+                batch_size, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE
+            )
 
-        (
-            x_hat,
-            priors_logit,
-            ht_minus_1,
-            zt_minus_1,
-            posteriors_logit,
-            pred_r,
-            pred_c,
-        ) = world_model.forward(
+        (recurrent_states[:, i], posteriors[:, i], posteriors_logits[:, i],) = world_model.forward(
             data["obs"][:, i], at_minus_1, ht_minus_1, zt_minus_1, is_first=data["first"][:, i]
         )
 
-        # TODO make this one line somehow
-        # maybe fill the tensor directly?
-        reconstructed_obs[:, i] = x_hat
-        posteriors[:, i] = zt_minus_1
-        recurrent_states[:, i] = ht_minus_1
-        posteriors_logits[:, i] = posteriors_logit
-        priors_logits[:, i] = priors_logit
-        pred_rewards[:, i] = pred_r
-        pred_continues[:, i] = pred_c
+    reconstructed_obs = world_model.decoder(recurrent_states, posteriors)  # (B, T, obs_dim)
+    _, priors_logits = world_model.transition_model(recurrent_states)
+    pred_rewards = world_model.reward_model(recurrent_states, posteriors)  # (B, 1)
+    pred_continues = world_model.continue_model(recurrent_states, posteriors)  # (B, 1)
 
     priors_logits = priors_logits.view(
         batch_size, seq_len, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE
@@ -145,28 +115,26 @@ def train_step_world_model(data, world_model, optim):
     optim.zero_grad()
 
     # compute losses
-    # TODO use the validate args arg!! get it from cfg or smth
-    # TODO fold that into SymLog loss class? though it's gonna make it less readable maybe?
-    distance = 0.5 * (reconstructed_obs - symlog(data["obs"])) ** 2
-    distance = torch.where(distance < MIN_SYMLOG_DISTANCE, 0, distance)
+    # TODO use the validate args arg? get it from cfg or smth
+    distance = 0.5 * (reconstructed_obs - symlog(data["obs"])) ** 2  # Eq. 1
+    distance = torch.where(
+        distance < MIN_SYMLOG_DISTANCE, 0, distance
+    )  # got that from the offical implem
     recon_loss = distance.sum(dim=[-1])
 
-    # TODO how is that working?? we should have more logits at the output of the reward net
-    # also it needs to be initialized with zero weights for the output layer i think?
     rew_loss = -TwoHotEncodingDistribution(pred_rewards, dims=1).log_prob(
         data["reward"]
     )  # sum over the last dim
+
     continue_loss = -Independent(
         torch.distributions.Bernoulli(logits=pred_continues),
         1,
-    ).log_prob(
-        1.0 - data["done"].float()
-    )  # TODO do we need to multiply that by 1.0?
+    ).log_prob(1.0 - data["done"])
     loss_pred = (recon_loss + rew_loss + continue_loss).mean()  # average accross batch and time
 
     # kl loss
     # TODO fold that into a KL loss func/class?
-    free_nats = torch.tensor([1], device=device)
+    free_nats = torch.tensor([1], dtype=torch.float32, device=device)
     loss_dyn = torch.max(
         free_nats,
         kl_divergence(
@@ -177,7 +145,7 @@ def train_step_world_model(data, world_model, optim):
     loss_rep = torch.max(
         free_nats,
         kl_divergence(
-            Independent(  # independant is so that each batch is independant
+            Independent(  # independant is so that each event is independant
                 OneHotCategoricalStraightThrough(logits=posteriors_logits), 1
             ),
             Independent(OneHotCategoricalStraightThrough(logits=priors_logits.detach()), 1),
@@ -186,7 +154,7 @@ def train_step_world_model(data, world_model, optim):
 
     loss = BETA_PRED * loss_pred + BETA_DYN * loss_dyn + BETA_REP * loss_rep
     loss.backward()
-
+    torch.nn.utils.clip_grad_norm_(world_model.parameters(), WM_GRADIENT_CLIP)
     optim.step()
     return (
         recurrent_states,
@@ -254,7 +222,7 @@ def train_actor_critic(
 
     # update the slow critic by mixing it with the critic
     for s, d in zip(critic.parameters(), slow_critic.parameters()):
-        d.data = 0.02 * s.data + (1 - 0.02) * d.data
+        d.data = (1 - CRITIC_EMA_DECAY) * s.data + CRITIC_EMA_DECAY * d.data
 
     # we need something to hold the trajectories
     # we'll have a new batch_size of old_batch_size * old_seq_len
@@ -349,12 +317,8 @@ def train_actor_critic(
         :, :-2
     ]  # again discard last action bc we bootstrap
     actor_loss = -logpi * sg(advantage[:, 1:].squeeze(-1))
-    actor_loss = actor_loss * traj_weight[:, :-1]
-    actor_loss -= ACTOR_ENTROPY * policy.entropy()[:, :-1]
-    # ignore first action bc it was taken from a non imagine state
-    # don't see it in the official implem but sheeprl blog post for v1 says its crucial
-    # also not sure that's the right way to do it? TODO
-    # actor_loss = actor_loss[:, 1:]
+    actor_loss = actor_loss * traj_weight[:, :-2]
+    actor_loss -= ACTOR_ENTROPY * policy.entropy()[:, :-2]
     actor_loss = actor_loss.mean()
     actor_loss.backward()
     torch.nn.utils.clip_grad_norm_(actor.parameters(), ACTOR_GRADIENT_CLIP)
@@ -363,44 +327,41 @@ def train_actor_critic(
     return {"loss/actor": actor_loss, "loss/critic": critic_loss}
 
 
-def collect_rollout(
-    env, replay_buffer, actor: Actor = None, rssm: RSSM = None, deterministic=False
-):
+def collect_rollout(env, replay_buffer, actor: Actor = None, rssm: RSSM = None):
+    use_actor = actor is not None and rssm is not None
     with torch.no_grad():
         obs, _ = env.reset()
-        if replay_buffer is not None:
-            # TODO do we actually want that????
-            # in discrete action spaces we can't send a zero action?
-            # and there is no action that actually lead to the first state
-            # so its a bit weird?
-            replay_buffer.add(0, obs, 0, False, True)
-        if rssm is not None:
+        if use_actor:
             ht_minus_1 = torch.zeros(1, GRU_RECCURENT_UNITS, device=device)
+            zt_minus_1 = torch.zeros(
+                1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device
+            )
             zt_dist, _ = rssm.representation_model(
                 torch.tensor(obs).unsqueeze(0).to(device), ht_minus_1
             )
             zt_minus_1 = zt_dist.sample()
+
         done = False
         first = True
         episode_return = 0
+
         while not done:
-            if actor is not None and rssm is not None:
+            if use_actor:
                 act_dist = actor(ht_minus_1, zt_minus_1)
-                if deterministic:
-                    act = act_dist.mode
-                else:
-                    act = act_dist.sample()
+                act = act_dist.sample()
                 act = act.unsqueeze(0)
                 ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
             else:
                 act = env.action_space.sample()
+
             obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
             episode_return += reward
-            if actor is not None and rssm is not None:
+
+            if use_actor:
                 zt_dist, _ = rssm.representation_model(
                     torch.tensor(obs).to(device).unsqueeze(0), ht_minus_1
                 )
-                zt_minus_1 = zt_dist.sample()  # TODO make mode method on all dists #sample()
+                zt_minus_1 = zt_dist.sample()
 
             first = False
             done = terminated or truncated
@@ -408,7 +369,6 @@ def collect_rollout(
             if replay_buffer is not None:
                 # replay_buffer.add(act, obs, reward, terminated, first)
                 replay_buffer.add(act, obs, reward, done, first)
-        print(f"Episode return: {episode_return}")
     return episode_return
 
 
@@ -416,8 +376,6 @@ def collect_rollout(
 def main(cfg: DictConfig):
     if not DEBUG:
         run = wandb.init(project="minidream_dev", job_type="train")
-    # setup logger
-    # TODO
 
     # setup env
     env = gymnasium.make("CartPole-v1")
@@ -453,14 +411,11 @@ def main(cfg: DictConfig):
     losses = {}
 
     for _ in trange(cfg.iterations):
-        print("Collecting transitions...")
         episode_return = collect_rollout(env, replay_buffer, actor, world_model)
         # TODO put this in a loop and use it for the train ratio?
         data = replay_buffer.sample(cfg.batch_size, cfg.seq_len).to(device)
 
-        print("Training world model...")
         hts, zts, wm_loss_dict = train_step_world_model(data, world_model, wm_opt)
-        print("Training actor and critic...")
         for _ in range(TRAIN_RATIO // IMAGINE_HORIZON):
             actor_critic_loss_dict = train_actor_critic(
                 data, hts, zts, world_model, actor, critic, slow_critic, actor_opt, critic_opt
@@ -476,7 +431,7 @@ def main(cfg: DictConfig):
             losses[k] = losses.get(k, [])
             losses[k].append(v.detach().cpu().item())
 
-    collect_rollout(env, replay_buffer, actor, world_model, deterministic=True)
+    collect_rollout(env, replay_buffer, actor, world_model)
     # plot losses and save plot.png
     _, ax = plt.subplots(len(losses.keys()), 1, figsize=(8, 6))
 

@@ -11,7 +11,7 @@ GRU_RECCURENT_UNITS = 512
 DENSE_HIDDEN_UNITS = 512
 NLP_NB_HIDDEN_LAYERS = 2
 STOCHASTIC_STATE_SIZE = 32
-BUCKETS = 255
+TWOHOTBUCKETS = 255
 
 
 class RSSM(nn.Module):
@@ -31,7 +31,7 @@ class RSSM(nn.Module):
         self.decoder = Decoder(
             observation_space=observation_space,
         )
-        self.reward_model = PredModel(255, output_zero_init=True)
+        self.reward_model = PredModel(TWOHOTBUCKETS, output_zero_init=True)
         self.continue_model = PredModel(1)
         self.reward_ema = EMA()
 
@@ -46,21 +46,15 @@ class RSSM(nn.Module):
         # reset ht_minus_1, zt_minus_1 and action if it's the first step of an episode
         # at_minus_1 = at_minus_1 * (1 - is_first)
         # TODO is that the proper way to reset the initial state?
-        zt_minus_1 = zt_minus_1 * (1 - is_first.unsqueeze(2).float())
-        ht_minus_1 = ht_minus_1 * (1 - is_first.float())
+        # TODO do we need to stop the gradients here?
+        zt_minus_1 = zt_minus_1 * (1 - is_first.unsqueeze(2))
+        ht_minus_1 = ht_minus_1 * (1 - is_first)
 
         ht = self.recurrent_model(ht_minus_1, zt_minus_1, at_minus_1)  # (B, GRU_RECCURENT_UNITS)
         zt_dist, posterior_logits = self.representation_model(x, ht)
         zt = zt_dist.sample()  # (B, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE)
-        x_hat = self.decoder(ht, zt)  # (B, obs_dim)
-        _, priors_logits = self.transition_model(ht)
-        r = self.reward_model(ht, zt)  # (B, 1)
-        c = self.continue_model(ht, zt)  # (B, 1)
 
-        return x_hat, priors_logits, ht, zt, posterior_logits, r, c
-
-    def imagine(self):
-        pass
+        return ht, zt, posterior_logits
 
 
 def make_mlp(
@@ -84,7 +78,7 @@ def make_mlp(
         layers.append(nn.SiLU())
     output_layer = nn.Linear(hidden_dim, output_dim)
     if output_zero_init:
-        # do i even need torch.nn.init?
+        # do i even need torch.nn.init? what about setting the data
         torch.nn.init.zeros_(output_layer.weight)  # init to zero or init to normal with mean=0??
         torch.nn.init.zeros_(output_layer.bias)  # TODO do we also need to init the bias to 0?
 
@@ -92,10 +86,7 @@ def make_mlp(
     return nn.Sequential(*layers)
 
 
-# TODO do we need GRU w/ layer norm?
-
-
-class RepresentationModel(nn.Module):
+class RepresentationModel(nn.Module):  # TODO GRU w/ layer norm
     """Encode the observation x + deterministic state ht into the stochastic state zt."""
 
     def __init__(
@@ -113,8 +104,7 @@ class RepresentationModel(nn.Module):
         x = symlog(x)
         logits = self.net(torch.cat([x, ht_minus_1], dim=-1))
         zt_dist = OneHotCategoricalStraightThrough(
-            # TODO make it work with batch + time
-            logits=logits.view(x.shape[0], STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE)
+            logits=logits.view(*list(x.shape[:-1]), STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE)
         )
         return zt_dist, logits
 
@@ -128,8 +118,9 @@ class RecurrentModel(nn.Module):
         action_space: gymnasium.spaces.Box,
     ):
         super().__init__()
+        self.action_space = action_space
         self.mlp = make_mlp(
-            input_dim=STOCHASTIC_STATE_SIZE**2 + 1,
+            input_dim=STOCHASTIC_STATE_SIZE**2 + self.action_space.n,
             output_dim=GRU_RECCURENT_UNITS,
         )
         self.GRU = nn.GRU(
@@ -139,6 +130,12 @@ class RecurrentModel(nn.Module):
         )
 
     def forward(self, ht_minus_1, zt_minus_1, a):
+        # one hot encode the action
+        # TODO remove the casting to long and actually pass a long tensor
+        # TODO add tensor type to typing?
+        a = torch.nn.functional.one_hot(
+            a.squeeze(-1).to(torch.long), num_classes=self.action_space.n
+        ).float()
         mlp_out = self.mlp(
             torch.cat([torch.flatten(zt_minus_1, start_dim=-2), a], dim=-1)
         )  # (batch_size, 128)
@@ -171,8 +168,9 @@ class TransitionModel(nn.Module):
     def forward(self, x):
         logits = self.net(x)
         zt_dist = OneHotCategoricalStraightThrough(
-            # TODO make it work with batch + time
-            logits=logits.view(x.shape[0], STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE)
+            logits=logits.view(
+                *list(logits.shape[:-1]), STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE
+            )
         )
         return zt_dist, logits
 
@@ -212,11 +210,9 @@ class Actor(nn.Module):
 class Critic(nn.Module):
     def __init__(self):
         super().__init__()
-        self.net = PredModel(BUCKETS, output_zero_init=True)
+        self.net = PredModel(TWOHOTBUCKETS, output_zero_init=True)
 
     def forward(self, ht, zt):
-        # TODO we need an actor for continuous action
-        # do we model a normal dist in this case?
         output = self.net(ht, zt)
         dist = TwoHotEncodingDistribution(logits=output, dims=1)
         return dist
