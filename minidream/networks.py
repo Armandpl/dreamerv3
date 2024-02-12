@@ -7,9 +7,9 @@ from minidream.dist import TwoHotEncodingDistribution
 from minidream.ema import EMA
 from minidream.functional import symlog
 
-GRU_RECCURENT_UNITS = 256
-DENSE_HIDDEN_UNITS = 256
-NLP_NB_HIDDEN_LAYERS = 1
+GRU_RECCURENT_UNITS = 512
+DENSE_HIDDEN_UNITS = 512
+NLP_NB_HIDDEN_LAYERS = 2
 STOCHASTIC_STATE_SIZE = 32
 BUCKETS = 255
 
