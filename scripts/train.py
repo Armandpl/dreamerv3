@@ -28,6 +28,7 @@ from minidream.rb import ReplayBuffer
 from minidream.wrappers import RescaleObs
 
 # TODO use autocast fp16?
+DEBUG = True
 
 # These are the SACRED hyper-parameters
 # Change them at your OWN RISK (don't)
@@ -345,15 +346,15 @@ def train_actor_critic(
         sg(hts), sg(zts)
     )  # TODO we've done this computation once already, can we cache it?
     logpi = policy.log_prob(sg(ats).squeeze(-1))[
-        :, :-1
+        :, :-2
     ]  # again discard last action bc we bootstrap
-    actor_loss = -logpi * sg(advantage.squeeze(-1))
+    actor_loss = -logpi * sg(advantage[:, 1:].squeeze(-1))
     actor_loss = actor_loss * traj_weight[:, :-1]
     actor_loss -= ACTOR_ENTROPY * policy.entropy()[:, :-1]
     # ignore first action bc it was taken from a non imagine state
     # don't see it in the official implem but sheeprl blog post for v1 says its crucial
     # also not sure that's the right way to do it? TODO
-    actor_loss = actor_loss[:, 1:]
+    # actor_loss = actor_loss[:, 1:]
     actor_loss = actor_loss.mean()
     actor_loss.backward()
     torch.nn.utils.clip_grad_norm_(actor.parameters(), ACTOR_GRADIENT_CLIP)
@@ -413,7 +414,8 @@ def collect_rollout(
 
 @hydra.main(version_base="1.3", config_path="configs", config_name="train.yaml")
 def main(cfg: DictConfig):
-    run = wandb.init(project="minidream_dev", job_type="train")
+    if not DEBUG:
+        run = wandb.init(project="minidream_dev", job_type="train")
     # setup logger
     # TODO
 
@@ -465,7 +467,10 @@ def main(cfg: DictConfig):
             )
 
         loss_dict = {**wm_loss_dict, **actor_critic_loss_dict}
-        run.log({**loss_dict, "episode_return": episode_return, "global_step": len(replay_buffer)})
+        if not DEBUG:
+            run.log(
+                {**loss_dict, "episode_return": episode_return, "global_step": len(replay_buffer)}
+            )
 
         for k, v in loss_dict.items():
             losses[k] = losses.get(k, [])
@@ -481,7 +486,8 @@ def main(cfg: DictConfig):
 
     plt.savefig("../data/plot.jpg")
 
-    run.finish()
+    if not DEBUG:
+        run.finish()
 
     # save models
     torch.save(world_model.state_dict(), "../data/world_model.pth")
