@@ -4,12 +4,12 @@ import gymnasium
 import hydra
 import matplotlib.pyplot as plt
 import torch
+import wandb
 from omegaconf import DictConfig
 from torch.distributions import Independent
 from torch.distributions.kl import kl_divergence
 from tqdm import trange
 
-import wandb
 from minidream.dist import OneHotDist as OneHotCategoricalStraightThrough
 from minidream.dist import TwoHotEncodingDistribution
 from minidream.functional import symlog
@@ -197,7 +197,7 @@ def compute_lambda_returns(rewards, values, continues):
     # rt is the reward at t, Vt the output of the critic at t, Ct the output of the continue network at t
     # TODO should we offset the values to get Vt+1? -> YES
     # seems we have to offset continues too? -> yes ofc else it doesn't match the value
-    interm = rewards[:, :-1] + GAMMA * continues[:, 1:] * values[:, 1:] * (
+    interm = rewards[:, :-1] + GAMMA * continues[:, :-1] * values[:, 1:] * (
         1 - RETURN_LAMBDA
     )  # (B, T, 1)
 
