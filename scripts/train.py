@@ -4,12 +4,12 @@ import gymnasium
 import hydra
 import matplotlib.pyplot as plt
 import torch
-import wandb
 from omegaconf import DictConfig
 from torch.distributions import Independent
 from torch.distributions.kl import kl_divergence
 from tqdm import trange
 
+import wandb
 from minidream.dist import OneHotDist as OneHotCategoricalStraightThrough
 from minidream.dist import TwoHotEncodingDistribution
 from minidream.functional import symlog
@@ -179,6 +179,7 @@ def train_step_world_model(data, world_model, optim):
 def compute_lambda_returns(rewards, values, continues):
     """Values is the output from the critic rewards are the predicted rewards continues are the
     predicted continue flags."""
+    horizon = rewards.shape[1] - 1
     # Eq. 7
     # lambda return shape should be (B, T, 1)
     # pred_rewards is (B, T, 1)
@@ -186,7 +187,7 @@ def compute_lambda_returns(rewards, values, continues):
     # continues is (B, T, 1)
     # where T is IMAGINE_HORIZON + 1
     batch_size = rewards.shape[0]
-    lambda_returns = torch.empty(batch_size, IMAGINE_HORIZON, 1, device=device)
+    lambda_returns = torch.empty(batch_size, horizon, 1, device=device)
 
     # we compute the equation by developping it
     # eq. 7 Rt = rt + GAMMA*Ct ( (1 - LAMBDA) * Vt+1 + LAMBDA * Rt+1)
@@ -201,9 +202,9 @@ def compute_lambda_returns(rewards, values, continues):
         1 - RETURN_LAMBDA
     )  # (B, T, 1)
 
-    for t in reversed(range(IMAGINE_HORIZON)):
+    for t in reversed(range(horizon)):
         # don't have access to rewards after horizon so we use the estimation
-        if t == (IMAGINE_HORIZON - 1):
+        if t == (horizon - 1):
             Rt_plus_1 = values[:, -1]
         else:
             Rt_plus_1 = lambda_returns[:, t + 1]
@@ -275,7 +276,7 @@ def train_actor_critic(
     ).mode  # TODO can we just do > 0.5?
     # make sur we don't use imagined trajectories from terminal states
     # so get the real termination flags for step=0
-    true_done = data["done"].view(-1, 1).float()
+    true_done = data["done"].view(-1, 1)
     continues[:, 0] = 1.0 - true_done[:, :1]
 
     with torch.no_grad():
@@ -285,23 +286,25 @@ def train_actor_critic(
     # compute the critic target: bootstrapped lambda return
     # ignoring t=0 bc its not imagined
     # and returning B, HORIZON-1, 1 because we use the last value to bootstrap
-    lambda_returns = compute_lambda_returns(pred_rewards, values, continues)  # (B, HORIZON, 1)
+    lambda_returns = compute_lambda_returns(
+        pred_rewards[:, 1:], values[:, 1:], continues[:, 1:]
+    )  # (B, HORIZON, 1)
 
     # TODO should we train the actor or the critic first?
     critic_opt.zero_grad()
     # TODO re compute the value dist for traj[:, :-1]
-    values_dist = critic(hts[:, :-1], zts[:, :-1])
+    values_dist = critic(sg(hts[:, 1:-1]), sg(zts[:, 1:-1]))
 
     # detach the slow critic bc we don't update its weights with gradient descent
     # we mix it with the critic and we train the critic to approach the output of the slow critic
-    slow_values = slow_critic(hts[:, :-1], zts[:, :-1]).mean.detach()
+    slow_values = slow_critic(sg(hts[:, 1:-1]), sg(zts[:, 1:-1])).mean.detach()
     critic_loss = -values_dist.log_prob(
         sg(lambda_returns)
     )  # symlog and symexp done in the distrib
     critic_loss -= values_dist.log_prob(slow_values)
     # TODO im confused why do we discount two times???
     # ok so i think the traj weight isnt a discount thing its to stop training after receiving the continue=0 flag
-    critic_loss = critic_loss * traj_weight[:, :-1]
+    critic_loss = critic_loss * traj_weight[:, 1:-1]
     critic_loss = critic_loss.mean()
     critic_loss.backward()
     critic_opt.step()
@@ -310,19 +313,19 @@ def train_actor_critic(
     # TODO norm the rewards
     actor_opt.zero_grad()
 
-    offset, invscale = world_model.reward_ema(pred_rewards)
+    offset, invscale = world_model.reward_ema(pred_rewards[:, 1:])
     normed_lambda_returns = (lambda_returns - offset) * invscale
-    normed_values = (values[:, :-1] - offset) * invscale
+    normed_values = (values[:, 1:-1] - offset) * invscale
     advantage = normed_lambda_returns - normed_values
 
     policy = actor(
-        sg(hts), sg(zts)
+        sg(hts[:, 1:]), sg(zts[:, 1:])
     )  # TODO we've done this computation once already, can we cache it?
-    logpi = policy.log_prob(sg(ats).squeeze(-1))[
+    logpi = policy.log_prob(sg(ats[:, 1:]).squeeze(-1))[
         :, :-2
     ]  # again discard last action bc we bootstrap
     actor_loss = -logpi * sg(advantage[:, 1:].squeeze(-1))
-    actor_loss = actor_loss * traj_weight[:, :-2]
+    actor_loss = actor_loss * traj_weight[:, 1:-2]
     actor_loss -= ACTOR_ENTROPY * policy.entropy()[:, :-2]
     actor_loss = actor_loss.mean()
     actor_loss.backward()
@@ -417,6 +420,7 @@ def main(cfg: DictConfig):
     done = True
     learning_has_started = False
     for _ in trange(cfg.max_steps):
+
         if done:
             obs, _ = env.reset()
             first = True
