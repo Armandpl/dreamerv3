@@ -109,7 +109,7 @@ class RSSM(nn.Module):
         is_first: Tensor,  # is it the first episode step (B, 1)
     ):
         # reset ht_minus_1, zt_minus_1 and action if it's the first step of an episode
-        # at_minus_1 = at_minus_1 * (1 - is_first)
+        at_minus_1 = at_minus_1 * (1 - is_first)
         # TODO is that the proper way to reset the initial state?
         # TODO do we need to stop the gradients here?
         zt_minus_1 = zt_minus_1 * (1 - is_first.unsqueeze(2))
