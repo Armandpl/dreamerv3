@@ -26,7 +26,7 @@ from minidream.wrappers import RescaleObs
 
 DEBUG = False  # wether or not to use wandb
 
-# Tuning the HPs = losing, don't
+# Tuning the HPs = losing
 # Actor Critic
 GAMMA = 1 - 1 / 333
 IMAGINE_HORIZON = 15
@@ -56,14 +56,8 @@ BATCH_LENGTH = 64
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def train_step_world_model(data, world_model, optim):
-    """Train the world model for one step. data contains a batch of replay transitions of shape (B,
-    T, ...) it contains past actions, observations, rewards and dones.
-
-    dones = terminated, not terminated or truncated # <-- TODO actually not sure abt that
-    """
+def run_world_model(data, world_model):
     batch_size, seq_len = data["obs"].shape[0:2]
-    # initialize tensors to collect priors and posteriors states with their associated logits
     posteriors_logits = torch.empty(batch_size, seq_len, STOCHASTIC_STATE_SIZE**2, device=device)
     posteriors = torch.empty(  # sampled posteriors
         batch_size,
@@ -99,6 +93,17 @@ def train_step_world_model(data, world_model, optim):
         (recurrent_states[:, i], posteriors[:, i], posteriors_logits[:, i],) = world_model.forward(
             data["obs"][:, i], at_minus_1, ht_minus_1, zt_minus_1, is_first=data["first"][:, i]
         )
+    return recurrent_states, posteriors, posteriors_logits
+
+
+def train_step_world_model(data, world_model, optim):
+    """Train the world model for one step. data contains a batch of replay transitions of shape (B,
+    T, ...) it contains past actions, observations, rewards and dones.
+
+    dones = terminated, not terminated or truncated # <-- TODO actually not sure abt that
+    """
+    batch_size, seq_len = data["obs"].shape[0:2]
+    recurrent_states, posteriors, posteriors_logits = run_world_model(data, world_model)
 
     reconstructed_obs = world_model.decoder(recurrent_states, posteriors)  # (B, T, obs_dim)
     _, priors_logits = world_model.transition_model(recurrent_states)
@@ -364,12 +369,12 @@ def collect_rollout(env, replay_buffer, actor: Actor = None, rssm: RSSM = None):
                 )
                 zt_minus_1 = zt_dist.sample()
 
-            first = False
             done = terminated or truncated
 
             if replay_buffer is not None:
                 # replay_buffer.add(act, obs, reward, terminated, first)
                 replay_buffer.add(act, obs, reward, done, first)
+            first = False
     return episode_return
 
 
@@ -381,6 +386,7 @@ def main(cfg: DictConfig):
     # setup env
     env = gymnasium.make("CartPole-v1")
     env = RescaleObs(env)
+    eval_env = copy.deepcopy(env)
     replay_buffer = ReplayBuffer(REPLAY_CAPACITY, env.action_space, env.observation_space)
 
     # setup models and opts
@@ -404,35 +410,67 @@ def main(cfg: DictConfig):
     print(f"actor size: {count_parameters(actor)/1e6:.2f}M")
     print(f"critic size: {count_parameters(critic)/1e6:.2f}M")
 
-    # warm up
-    print("Collecting initial transitions")
-    while replay_buffer.count < cfg.learning_starts:
-        collect_rollout(env, replay_buffer)
-
     losses = {}
 
     print("Training")
-    for _ in trange(cfg.iterations):
-        episode_return = collect_rollout(env, replay_buffer, actor, world_model)
-        data = replay_buffer.sample(cfg.batch_size, cfg.seq_len).to(device)
+    log_every = 128
+    done = True
+    learning_has_started = False
+    for _ in trange(cfg.max_steps):
+        if done:
+            obs, _ = env.reset()
+            first = True
+            with torch.no_grad():
+                ht_minus_1 = torch.zeros(1, GRU_RECCURENT_UNITS, device=device)
+                zt_minus_1 = torch.zeros(
+                    1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device
+                )
+                zt_dist, _ = world_model.representation_model(
+                    torch.tensor(obs).unsqueeze(0).to(device), ht_minus_1
+                )
+                zt_minus_1 = zt_dist.sample()
 
-        hts, zts, wm_loss_dict = train_step_world_model(data, world_model, wm_opt)
-        for _ in range(TRAIN_RATIO // IMAGINE_HORIZON):
+        # choose action w/ actor
+        with torch.no_grad():
+            act_dist = actor(ht_minus_1, zt_minus_1)
+            act = act_dist.sample()
+            act = act.unsqueeze(0)
+            ht_minus_1 = world_model.recurrent_model(ht_minus_1, zt_minus_1, act)
+            act = act.cpu()
+
+        obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
+        done = terminated or truncated
+        replay_buffer.add(act, obs, reward, done, first)
+        first = False
+
+        # encode obs
+        zt_dist, _ = world_model.representation_model(
+            torch.tensor(obs).to(device).unsqueeze(0), ht_minus_1
+        )
+        zt_minus_1 = zt_dist.sample()
+
+        if (
+            replay_buffer.count % (cfg.batch_size * cfg.seq_len // TRAIN_RATIO) == 0
+        ) and replay_buffer.count > cfg.learning_starts:  # should train
+            data = replay_buffer.sample(cfg.batch_size, cfg.seq_len).to(device)
+            hts, zts, wm_loss_dict = train_step_world_model(data, world_model, wm_opt)
             actor_critic_loss_dict = train_actor_critic(
                 data, hts, zts, world_model, actor, critic, slow_critic, actor_opt, critic_opt
             )
+            learning_has_started = True
 
-        loss_dict = {**wm_loss_dict, **actor_critic_loss_dict}
-        if not DEBUG:
+        # TODO average the losses over sim steps?
+        if not DEBUG and replay_buffer.count % log_every == 0 and learning_has_started:
+            episode_return = collect_rollout(eval_env, None)
+            loss_dict = {**wm_loss_dict, **actor_critic_loss_dict}
             run.log(
                 {**loss_dict, "episode_return": episode_return, "global_step": replay_buffer.count}
             )
 
-        for k, v in loss_dict.items():
-            losses[k] = losses.get(k, [])
-            losses[k].append(v.detach().cpu().item())
+            for k, v in loss_dict.items():
+                losses[k] = losses.get(k, [])
+                losses[k].append(v.detach().cpu().item())
 
-    collect_rollout(env, replay_buffer, actor, world_model)
     # plot losses and save plot.png
     _, ax = plt.subplots(len(losses.keys()), 1, figsize=(8, 6))
 
