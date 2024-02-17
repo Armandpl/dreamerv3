@@ -1,0 +1,157 @@
+import copy
+
+import gymnasium as gym
+import torch
+from torch import Tensor
+from tqdm import trange
+from train import (
+    ACTOR_CRITIC_LR,
+    ACTOR_ENTROPY,
+    ACTOR_GRADIENT_CLIP,
+    ADAM_EPSILON,
+    CRITIC_EMA_DECAY,
+    GAMMA,
+    RETURN_LAMBDA,
+    compute_lambda_returns,
+)
+
+import wandb
+from minidream.dist import TwoHotEncodingDistribution
+from minidream.ema import EMA
+from minidream.networks import (
+    GRU_RECCURENT_UNITS,
+    STOCHASTIC_STATE_SIZE,
+    Actor,
+    Critic,
+    make_mlp,
+    uniform_init_weights,
+)
+from minidream.rb import ReplayBuffer
+from minidream.wrappers import RescaleObs
+
+DEBUG = False
+
+TRAIN_EVERY = 16
+# UPDATE_CRITIC_EVERY = 1
+MAX_STEPS = 100_000
+BATCH_SIZE = 16
+SEQ_LEN = 64
+LEARNING_STARTS = 1024
+
+
+def compute_lambda_values(
+    rewards: Tensor,
+    values: Tensor,
+    continues: Tensor,
+    lmbda: float = 0.95,
+):
+    vals = [values[-1:]]
+    interm = rewards + continues * values * (1 - lmbda)
+    for t in reversed(range(len(continues))):
+        vals.append(interm[t] + continues[t] * lmbda * vals[-1])
+    ret = torch.cat(list(reversed(vals))[:-1])
+    return ret
+
+
+def main():
+    if not DEBUG:
+        run = wandb.init(project="minidream_dev")
+    env = gym.make("CartPole-v1")
+    env = RescaleObs(env)
+
+    replay_buffer = ReplayBuffer(MAX_STEPS, env.action_space, env.observation_space)
+
+    actor = make_mlp(env.observation_space.shape[0], env.action_space.n)
+    critic = make_mlp(env.observation_space.shape[0], 255)
+    critic[-1].apply(uniform_init_weights(0.0))
+    slow_critic = copy.deepcopy(critic)  # TODO maybe we can should just intantiate a new one
+
+    actor_opt = torch.optim.Adam(actor.parameters(), lr=ACTOR_CRITIC_LR, eps=ADAM_EPSILON)
+    critic_opt = torch.optim.Adam(critic.parameters(), lr=ACTOR_CRITIC_LR, eps=ADAM_EPSILON)
+    return_ema = EMA()  # TODO should this be the return EMA or the reward ema???
+
+    done = True
+    episode_return = 0
+    for step in trange(MAX_STEPS):
+        # collect experience
+        if done:
+            obs, _ = env.reset()
+            first = True
+            # print(f"Step: {step}, episode return: {episode_return}")
+            run.log({"episode_return": episode_return, "global_step": step})
+            episode_return = 0
+
+        with torch.no_grad():
+            out = actor(torch.tensor(obs).unsqueeze(0))
+            action = torch.distributions.Categorical(logits=out).sample()
+        obs, reward, truncated, terminated, _ = env.step(action.cpu().item())
+        episode_return += reward
+        # done = terminated or truncated
+        done = terminated or truncated
+
+        replay_buffer.add(action, obs, reward, done, first)
+        first = False
+
+        # train
+        if step % TRAIN_EVERY == 0 and step > LEARNING_STARTS:
+            # update the slow critic by mixing it with the critic
+            for s, d in zip(critic.parameters(), slow_critic.parameters()):
+                d.data = (1 - CRITIC_EMA_DECAY) * s.data + CRITIC_EMA_DECAY * d.data
+
+            data = replay_buffer.sample(BATCH_SIZE, SEQ_LEN)
+            values = TwoHotEncodingDistribution(critic(data["obs"]), dims=1).mean  # 16, 64, 1
+            continues = 1.0 - data["done"]
+            # lambda_returns = compute_lambda_values(data["reward"][:, 1:], values, continues*GAMMA)
+            lambda_returns = compute_lambda_returns(data["reward"], values, continues)
+
+            with torch.no_grad():
+                traj_weight = torch.cumprod(GAMMA * continues, dim=1) / GAMMA
+
+            critic_opt.zero_grad()
+            values_dist = TwoHotEncodingDistribution(critic(data["obs"][:, :-1]))
+
+            # detach the slow critic bc we don't update its weights with gradient descent
+            # we mix it with the critic and we train the critic to approach the output of the slow critic
+            slow_values = TwoHotEncodingDistribution(
+                slow_critic(data["obs"][:, :-1])
+            ).mean.detach()
+            critic_loss = -values_dist.log_prob(lambda_returns.detach())
+            critic_loss -= values_dist.log_prob(slow_values)
+
+            critic_loss = critic_loss * traj_weight[:, :-1]
+            critic_loss = critic_loss.mean()
+            critic_loss.backward()
+            critic_opt.step()
+
+            # train the actor
+            actor_opt.zero_grad()
+
+            offset, invscale = return_ema(lambda_returns)
+            normed_lambda_returns = (lambda_returns - offset) * invscale
+            normed_values = (values[:, :-1] - offset) * invscale
+            advantage = normed_lambda_returns - normed_values
+            # advantage = lambda_returns - values[:, :-1]
+
+            policy = torch.distributions.Categorical(logits=actor(data["obs"][:, :-1]))
+            logpi = policy.log_prob(data["action"][:, :-1].squeeze(-1)).unsqueeze(-1)
+            actor_loss = -logpi * advantage.detach()
+            actor_loss = actor_loss * traj_weight[:, :-1]
+            actor_loss -= ACTOR_ENTROPY * policy.entropy().unsqueeze(-1)
+            actor_loss = actor_loss.mean()
+            actor_loss.backward()
+            torch.nn.utils.clip_grad_norm_(actor.parameters(), ACTOR_GRADIENT_CLIP)
+            actor_opt.step()
+            if not DEBUG:
+                run.log(
+                    {
+                        "actor_loss": actor_loss.item(),
+                        "critic_loss": critic_loss.item(),
+                        "global_step": step,
+                    }
+                )
+    if not DEBUG:
+        run.finish()
+
+
+if __name__ == "__main__":
+    main()
