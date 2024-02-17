@@ -198,17 +198,19 @@ def compute_lambda_returns(rewards, values, continues):
     # rt is the reward at t, Vt the output of the critic at t, Ct the output of the continue network at t
     # TODO should we offset the values to get Vt+1? -> YES
     # seems we have to offset continues too? -> yes ofc else it doesn't match the value
-    interm = rewards[:, :-1] + GAMMA * continues[:, :-1] * values[:, 1:] * (
+    interm = rewards[:, :-1] + GAMMA * continues[:, 1:] * values[:, 1:] * (
         1 - RETURN_LAMBDA
     )  # (B, T, 1)
 
-    for t in reversed(range(horizon)):
+    for t in reversed(range(horizon)):  # TODO can we use [::-1] synthax
         # don't have access to rewards after horizon so we use the estimation
         if t == (horizon - 1):
             Rt_plus_1 = values[:, -1]
         else:
             Rt_plus_1 = lambda_returns[:, t + 1]
-        lambda_returns[:, t] = interm[:, t] + continues[:, t] * GAMMA * RETURN_LAMBDA * Rt_plus_1
+        lambda_returns[:, t] = (
+            interm[:, t] + continues[:, t + 1] * GAMMA * RETURN_LAMBDA * Rt_plus_1
+        )
 
     return lambda_returns
 
