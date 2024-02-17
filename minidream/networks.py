@@ -98,7 +98,7 @@ class RSSM(nn.Module):
         )
         self.reward_model = PredModel(TWOHOTBUCKETS, output_init=uniform_init_weights(0.0))
         self.continue_model = PredModel(1, output_init=uniform_init_weights(1.0))
-        self.reward_ema = EMA()
+        self.return_ema = EMA()
 
     def forward(
         self,

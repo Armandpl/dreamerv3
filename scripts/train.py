@@ -28,10 +28,12 @@ DEBUG = False  # wether or not to use wandb
 
 # Tuning the HPs = losing
 # Actor Critic
-GAMMA = 1 - 1 / 333
+# GAMMA = 1 - (1 / 333)
+GAMMA = 0.99
 IMAGINE_HORIZON = 15
 RETURN_LAMBDA = 0.95
-ACTOR_ENTROPY = 3e-4
+# ACTOR_ENTROPY = 3e-4
+ACTOR_ENTROPY = 3e-3
 ACTOR_CRITIC_LR = 3e-5
 ADAM_EPSILON = 1e-5
 ACTOR_GRADIENT_CLIP = 100.0
@@ -47,7 +49,7 @@ WM_ADAM_EPSILON = 1e-8
 WM_GRADIENT_CLIP = 1000.0  # TODO do we have to clip norm or values? nm512 clips norm
 
 #
-TRAIN_RATIO = 32  # ratio between real steps and imagined steps
+TRAIN_RATIO = 64  # ratio between real steps and imagined steps
 REPLAY_CAPACITY = 1_000_000  # FIFO
 BATCH_SIZE = 16
 BATCH_LENGTH = 64
@@ -96,14 +98,15 @@ def run_world_model(data, world_model):
     return recurrent_states, posteriors, posteriors_logits
 
 
-def train_step_world_model(data, world_model, optim):
+def train_step_world_model(
+    data, recurrent_states, posteriors, posteriors_logits, world_model, optim
+):
     """Train the world model for one step. data contains a batch of replay transitions of shape (B,
     T, ...) it contains past actions, observations, rewards and dones.
 
     dones = terminated, not terminated or truncated # <-- TODO actually not sure abt that
     """
     batch_size, seq_len = data["obs"].shape[0:2]
-    recurrent_states, posteriors, posteriors_logits = run_world_model(data, world_model)
 
     reconstructed_obs = world_model.decoder(recurrent_states, posteriors)  # (B, T, obs_dim)
     _, priors_logits = world_model.transition_model(recurrent_states)
@@ -161,19 +164,15 @@ def train_step_world_model(data, world_model, optim):
     loss.backward()
     torch.nn.utils.clip_grad_norm_(world_model.parameters(), WM_GRADIENT_CLIP)
     optim.step()
-    return (
-        recurrent_states,
-        posteriors,
-        {
-            "loss/total": loss,
-            "loss/pred": loss_pred,
-            "loss/dyn": loss_dyn,
-            "loss/rep": loss_rep,
-            "loss/recon": recon_loss.mean(),
-            "loss/reward": rew_loss.mean(),
-            "loss/continue": continue_loss.mean(),
-        },
-    )
+    return {
+        "loss/total": loss,
+        "loss/pred": loss_pred,
+        "loss/dyn": loss_dyn,
+        "loss/rep": loss_rep,
+        "loss/recon": recon_loss.mean(),
+        "loss/reward": rew_loss.mean(),
+        "loss/continue": continue_loss.mean(),
+    }
 
 
 def compute_lambda_returns(rewards, values, continues):
@@ -227,10 +226,6 @@ def train_actor_critic(
     critic_opt,
 ):
     batch_size, seq_len = data["action"].shape[0:2]
-
-    # update the slow critic by mixing it with the critic
-    for s, d in zip(critic.parameters(), slow_critic.parameters()):
-        d.data = (1 - CRITIC_EMA_DECAY) * s.data + CRITIC_EMA_DECAY * d.data
 
     # we need something to hold the trajectories
     # we'll have a new batch_size of old_batch_size * old_seq_len
@@ -288,53 +283,62 @@ def train_actor_critic(
     # compute the critic target: bootstrapped lambda return
     # ignoring t=0 bc its not imagined
     # and returning B, HORIZON-1, 1 because we use the last value to bootstrap
-    lambda_returns = compute_lambda_returns(
-        pred_rewards[:, 1:], values[:, 1:], continues[:, 1:]
-    )  # (B, HORIZON, 1)
+    lambda_returns = compute_lambda_returns(pred_rewards, values, continues)  # (B, HORIZON, 1)
 
     # TODO should we train the actor or the critic first?
     critic_opt.zero_grad()
     # TODO re compute the value dist for traj[:, :-1]
-    values_dist = critic(sg(hts[:, 1:-1]), sg(zts[:, 1:-1]))
+    values_dist = critic(sg(hts[:, :-1]), sg(zts[:, :-1]))
 
     # detach the slow critic bc we don't update its weights with gradient descent
     # we mix it with the critic and we train the critic to approach the output of the slow critic
-    slow_values = slow_critic(sg(hts[:, 1:-1]), sg(zts[:, 1:-1])).mean.detach()
+    slow_values = slow_critic(sg(hts[:, :-1]), sg(zts[:, :-1])).mean.detach()
     critic_loss = -values_dist.log_prob(
         sg(lambda_returns)
     )  # symlog and symexp done in the distrib
     critic_loss -= values_dist.log_prob(slow_values)
     # TODO im confused why do we discount two times???
     # ok so i think the traj weight isnt a discount thing its to stop training after receiving the continue=0 flag
-    critic_loss = critic_loss * traj_weight[:, 1:-1]
+    critic_loss = critic_loss * sg(traj_weight[:, :-1])
     critic_loss = critic_loss.mean()
     critic_loss.backward()
+    torch.nn.utils.clip_grad_norm_(critic.parameters(), ACTOR_GRADIENT_CLIP)
     critic_opt.step()
 
+    # update the slow critic by mixing it with the critic
+    for s, d in zip(critic.parameters(), slow_critic.parameters()):
+        d.data = (1 - CRITIC_EMA_DECAY) * s.data + CRITIC_EMA_DECAY * d.data
+
     # train the actor
-    # TODO norm the rewards
     actor_opt.zero_grad()
 
-    offset, invscale = world_model.reward_ema(pred_rewards[:, 1:])
+    offset, invscale = world_model.return_ema(lambda_returns)
     normed_lambda_returns = (lambda_returns - offset) * invscale
-    normed_values = (values[:, 1:-1] - offset) * invscale
+    normed_values = (values[:, :-1] - offset) * invscale
     advantage = normed_lambda_returns - normed_values
 
     policy = actor(
-        sg(hts[:, 1:]), sg(zts[:, 1:])
+        sg(hts[:, :-2]),
+        sg(zts[:, :-2]),  # loose one bc of lambda, loose one bc lambda return is at t+1
     )  # TODO we've done this computation once already, can we cache it?
-    logpi = policy.log_prob(sg(ats[:, 1:]).squeeze(-1))[
-        :, :-2
-    ]  # again discard last action bc we bootstrap
+    logpi = policy.log_prob(sg(ats[:, :-2]).squeeze(-1))
     actor_loss = -logpi * sg(advantage[:, 1:].squeeze(-1))
-    actor_loss = actor_loss * traj_weight[:, 1:-2]
-    actor_loss -= ACTOR_ENTROPY * policy.entropy()[:, :-2]
+    actor_entropy = policy.entropy()
+    actor_loss -= ACTOR_ENTROPY * actor_entropy
+    actor_loss = actor_loss * sg(traj_weight[:, :-2])
     actor_loss = actor_loss.mean()
     actor_loss.backward()
     torch.nn.utils.clip_grad_norm_(actor.parameters(), ACTOR_GRADIENT_CLIP)
     actor_opt.step()
 
-    return {"loss/actor": actor_loss, "loss/critic": critic_loss}
+    return {
+        "agent/actor": actor_loss,
+        "agent/critic": critic_loss,
+        "agent/advantage": advantage.mean(),
+        "agent/ema_offset": offset.mean(),
+        "agent/ema_invscale": invscale.mean(),
+        "agent/entropy": actor_entropy.mean(),
+    }
 
 
 def collect_rollout(env, replay_buffer, actor: Actor = None, rssm: RSSM = None):
@@ -390,8 +394,8 @@ def main(cfg: DictConfig):
 
     # setup env
     env = gymnasium.make("CartPole-v1")
-    env = RescaleObs(env)
-    eval_env = copy.deepcopy(env)
+    # env = RescaleObs(env)
+    # eval_env = copy.deepcopy(env)
     replay_buffer = ReplayBuffer(REPLAY_CAPACITY, env.action_space, env.observation_space)
 
     # setup models and opts
@@ -415,15 +419,15 @@ def main(cfg: DictConfig):
     print(f"actor size: {count_parameters(actor)/1e6:.2f}M")
     print(f"critic size: {count_parameters(critic)/1e6:.2f}M")
 
-    losses = {}
-
     print("Training")
-    log_every = 128
     done = True
-    learning_has_started = False
+    episode_return = 0
     for _ in trange(cfg.max_steps):
 
         if done:
+            if not DEBUG:
+                run.log({"episode_return": episode_return, "global_step": replay_buffer.count})
+            episode_return = 0
             obs, _ = env.reset()
             first = True
             with torch.no_grad():
@@ -446,6 +450,7 @@ def main(cfg: DictConfig):
 
         obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
         done = terminated or truncated
+        episode_return += reward
         replay_buffer.add(act, obs, reward, done, first)
         first = False
 
@@ -459,32 +464,24 @@ def main(cfg: DictConfig):
             replay_buffer.count % (cfg.batch_size * cfg.seq_len // TRAIN_RATIO) == 0
         ) and replay_buffer.count > cfg.learning_starts:  # should train
             data = replay_buffer.sample(cfg.batch_size, cfg.seq_len).to(device)
-            hts, zts, wm_loss_dict = train_step_world_model(data, world_model, wm_opt)
+
+            hts, zts, zts_logits = run_world_model(data, world_model)
+            # train world model 8 times less frequently
+            # TODO that's to debug since cartpole is easy to predict
+            if replay_buffer.count % (cfg.batch_size * cfg.seq_len // TRAIN_RATIO // 8) == 0:
+                wm_loss_dict = train_step_world_model(
+                    data, hts, zts, zts_logits, world_model, wm_opt
+                )
+            else:
+                wm_loss_dict = {}
             actor_critic_loss_dict = train_actor_critic(
                 data, hts, zts, world_model, actor, critic, slow_critic, actor_opt, critic_opt
             )
-            learning_has_started = True
 
-        # TODO average the losses over sim steps?
-        if not DEBUG and replay_buffer.count % log_every == 0 and learning_has_started:
-            episode_return = collect_rollout(eval_env, None)
             loss_dict = {**wm_loss_dict, **actor_critic_loss_dict}
             run.log(
                 {**loss_dict, "episode_return": episode_return, "global_step": replay_buffer.count}
             )
-
-            for k, v in loss_dict.items():
-                losses[k] = losses.get(k, [])
-                losses[k].append(v.detach().cpu().item())
-
-    # plot losses and save plot.png
-    _, ax = plt.subplots(len(losses.keys()), 1, figsize=(8, 6))
-
-    for idx, (k, v) in enumerate(losses.items()):
-        ax[idx].plot(v, label=k)
-        ax[idx].legend()
-
-    plt.savefig("../data/plot.jpg")
 
     if not DEBUG:
         run.finish()
