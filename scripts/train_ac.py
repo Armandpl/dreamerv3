@@ -1,6 +1,7 @@
 import copy
 
 import gymnasium as gym
+import numpy as np
 import torch
 from tqdm import trange
 from train import (
@@ -14,7 +15,7 @@ from train import (
 )
 
 import wandb
-from minidream.dist import TwoHotEncodingDistribution
+from minidream.dist import OneHotDist, TwoHotEncodingDistribution
 from minidream.ema import EMA
 from minidream.networks import make_mlp, uniform_init_weights
 from minidream.rb import ReplayBuffer
@@ -23,7 +24,7 @@ from minidream.wrappers import RescaleObs
 DEBUG = False
 
 TRAIN_EVERY = 32
-# UPDATE_CRITIC_EVERY = 1
+UPDATE_CRITIC_EVERY = 25
 MAX_STEPS = 100_000
 BATCH_SIZE = 16
 SEQ_LEN = 16
@@ -52,6 +53,7 @@ def main():
 
     done = True
     episode_return = 0
+    train_steps = 0
     for step in trange(MAX_STEPS):
         # collect experience
         if done:
@@ -68,14 +70,16 @@ def main():
         # done = terminated or truncated
         done = terminated or truncated
 
-        replay_buffer.add(action.cpu(), obs, reward, done, first)
+        replay_buffer.add(action[0].cpu(), obs, reward, done, first)
         first = False
 
         # train
         if step % TRAIN_EVERY == 0 and step > LEARNING_STARTS:
+            train_steps += 1
             # update the slow critic by mixing it with the critic
-            for s, d in zip(critic.parameters(), slow_critic.parameters()):
-                d.data = (1 - CRITIC_EMA_DECAY) * s.data + CRITIC_EMA_DECAY * d.data
+            if train_steps % UPDATE_CRITIC_EVERY == 0:
+                for s, d in zip(critic.parameters(), slow_critic.parameters()):
+                    d.data = (1 - CRITIC_EMA_DECAY) * s.data + CRITIC_EMA_DECAY * d.data
 
             data = replay_buffer.sample(BATCH_SIZE, SEQ_LEN).to(device)
             with torch.no_grad():  # TODO dk, should i only call the critic once??
@@ -87,12 +91,15 @@ def main():
                 traj_weight = torch.cumprod(GAMMA * continues, dim=1) / GAMMA
 
             critic_opt.zero_grad()
-            values_dist = TwoHotEncodingDistribution(critic(data["obs"][:, :-1]))
+            values_dist = TwoHotEncodingDistribution(
+                critic(data["obs"][:, :-1]),
+                dims=1,
+            )
 
             # detach the slow critic bc we don't update its weights with gradient descent
             # we mix it with the critic and we train the critic to approach the output of the slow critic
             slow_values = TwoHotEncodingDistribution(
-                slow_critic(data["obs"][:, :-1])
+                slow_critic(data["obs"][:, :-1]), dims=1
             ).mean.detach()
             critic_loss = -values_dist.log_prob(lambda_returns.detach())
             critic_loss -= values_dist.log_prob(slow_values)
@@ -110,7 +117,6 @@ def main():
             normed_lambda_returns = (lambda_returns - offset) * invscale
             normed_values = (values[:, :-1] - offset) * invscale
             advantage = normed_lambda_returns - normed_values
-            # advantage = lambda_returns - values[:, :-1]
 
             policy = torch.distributions.Categorical(logits=actor(data["obs"][:, :-1]))
             logpi = policy.log_prob(data["action"][:, :-1].squeeze(-1)).unsqueeze(-1)
@@ -129,6 +135,7 @@ def main():
                         "global_step": step,
                     }
                 )
+
     if not DEBUG:
         run.finish()
 
