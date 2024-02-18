@@ -32,8 +32,8 @@ DEBUG = False  # wether or not to use wandb
 GAMMA = 0.99
 IMAGINE_HORIZON = 15
 RETURN_LAMBDA = 0.95
-# ACTOR_ENTROPY = 3e-4
-ACTOR_ENTROPY = 3e-3
+ACTOR_ENTROPY = 3e-4
+# ACTOR_ENTROPY = 3e-3
 ACTOR_CRITIC_LR = 3e-5
 ADAM_EPSILON = 1e-5
 ACTOR_GRADIENT_CLIP = 100.0
@@ -313,8 +313,8 @@ def train_actor_critic(
     actor_opt.zero_grad()
 
     offset, invscale = world_model.return_ema(lambda_returns)
-    normed_lambda_returns = (lambda_returns - offset) * invscale
-    normed_values = (values[:, :-1] - offset) * invscale
+    normed_lambda_returns = (lambda_returns - offset) / invscale
+    normed_values = (values[:, :-1] - offset) / invscale
     advantage = normed_lambda_returns - normed_values
 
     policy = actor(

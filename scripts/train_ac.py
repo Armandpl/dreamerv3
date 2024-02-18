@@ -1,34 +1,32 @@
 import copy
 
 import gymnasium as gym
-import numpy as np
 import torch
 from tqdm import trange
-from train import (
+from train import (  # GAMMA,
     ACTOR_CRITIC_LR,
     ACTOR_ENTROPY,
     ACTOR_GRADIENT_CLIP,
     ADAM_EPSILON,
     CRITIC_EMA_DECAY,
-    GAMMA,
     compute_lambda_returns,
 )
 
 import wandb
-from minidream.dist import OneHotDist, TwoHotEncodingDistribution
+from minidream.dist import TwoHotEncodingDistribution
 from minidream.ema import EMA
 from minidream.networks import make_mlp, uniform_init_weights
 from minidream.rb import ReplayBuffer
-from minidream.wrappers import RescaleObs
 
 DEBUG = False
 
-TRAIN_EVERY = 32
-UPDATE_CRITIC_EVERY = 25
+TRAIN_EVERY = 64
+UPDATE_CRITIC_EVERY = 100
 MAX_STEPS = 100_000
 BATCH_SIZE = 16
 SEQ_LEN = 16
-LEARNING_STARTS = 1024
+LEARNING_STARTS = 2500
+GAMMA = 0.95
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -38,18 +36,17 @@ def main():
     if not DEBUG:
         run = wandb.init(project="minidream_dev")
     env = gym.make("CartPole-v1")
-    # env = RescaleObs(env)
 
     replay_buffer = ReplayBuffer(MAX_STEPS, env.action_space, env.observation_space)
 
     actor = make_mlp(env.observation_space.shape[0], env.action_space.n).to(device)
     critic = make_mlp(env.observation_space.shape[0], 255).to(device)
     critic[-1].apply(uniform_init_weights(0.0))
-    slow_critic = copy.deepcopy(critic)  # TODO maybe we can should just intantiate a new one
+    slow_critic = copy.deepcopy(critic)
 
     actor_opt = torch.optim.Adam(actor.parameters(), lr=ACTOR_CRITIC_LR, eps=ADAM_EPSILON)
     critic_opt = torch.optim.Adam(critic.parameters(), lr=ACTOR_CRITIC_LR, eps=ADAM_EPSILON)
-    return_ema = EMA()  # TODO should this be the return EMA or the reward ema???
+    return_ema = EMA()
 
     done = True
     episode_return = 0
@@ -59,18 +56,18 @@ def main():
         if done:
             obs, _ = env.reset()
             first = True
-            run.log({"episode_return": episode_return, "global_step": step})
+            if not DEBUG:
+                run.log({"episode_return": episode_return, "global_step": step})
             episode_return = 0
 
         with torch.no_grad():
             out = actor(torch.tensor(obs).unsqueeze(0).to(device))
-            action = torch.distributions.Categorical(logits=out).sample()
-        obs, reward, truncated, terminated, _ = env.step(action.cpu().item())
+            action = torch.distributions.Categorical(logits=out).sample().cpu().item()
+        obs, reward, truncated, terminated, _ = env.step(action)
         episode_return += reward
-        # done = terminated or truncated
         done = terminated or truncated
 
-        replay_buffer.add(action[0].cpu(), obs, reward, done, first)
+        replay_buffer.add(action, obs, reward, done, first)
         first = False
 
         # train
@@ -89,6 +86,7 @@ def main():
 
             with torch.no_grad():
                 traj_weight = torch.cumprod(GAMMA * continues, dim=1) / GAMMA
+                traj_weight = traj_weight.squeeze(-1)
 
             critic_opt.zero_grad()
             values_dist = TwoHotEncodingDistribution(
@@ -114,14 +112,14 @@ def main():
             actor_opt.zero_grad()
 
             offset, invscale = return_ema(lambda_returns)
-            normed_lambda_returns = (lambda_returns - offset) * invscale
-            normed_values = (values[:, :-1] - offset) * invscale
+            normed_lambda_returns = (lambda_returns - offset) / invscale
+            normed_values = (values[:, :-1] - offset) / invscale
             advantage = normed_lambda_returns - normed_values
 
             policy = torch.distributions.Categorical(logits=actor(data["obs"][:, :-1]))
-            logpi = policy.log_prob(data["action"][:, :-1].squeeze(-1)).unsqueeze(-1)
-            actor_loss = -logpi * advantage.detach()
-            actor_loss -= ACTOR_ENTROPY * policy.entropy().unsqueeze(-1)
+            logpi = policy.log_prob(data["action"][:, :-1].squeeze(-1))
+            actor_loss = -logpi * advantage.detach().squeeze(-1)
+            actor_loss -= ACTOR_ENTROPY * policy.entropy()
             actor_loss = actor_loss * traj_weight[:, :-1]
             actor_loss = actor_loss.mean()
             actor_loss.backward()
