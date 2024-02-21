@@ -3,31 +3,28 @@ import copy
 import gymnasium as gym
 import torch
 from tqdm import trange
-from train import (  # GAMMA,
-    ACTOR_CRITIC_LR,
-    ACTOR_ENTROPY,
-    ACTOR_GRADIENT_CLIP,
-    ADAM_EPSILON,
-    CRITIC_EMA_DECAY,
-    compute_lambda_returns,
-)
+from train import ACTOR_GRADIENT_CLIP, ADAM_EPSILON, CRITIC_EMA_DECAY, RETURN_LAMBDA
 
 import wandb
 from minidream.dist import TwoHotEncodingDistribution
 from minidream.ema import EMA
+from minidream.envs.andy import CriticTestEnv
+from minidream.envs.lightupbutton import PressTheLightUpButton
+from minidream.functional import compute_lambda_returns, symlog
 from minidream.networks import make_mlp, uniform_init_weights
 from minidream.rb import ReplayBuffer
 
 DEBUG = False
 
-TRAIN_EVERY = 64
-UPDATE_CRITIC_EVERY = 100
+TRAIN_EVERY = 1
+UPDATE_CRITIC_EVERY = 1
 MAX_STEPS = 100_000
 BATCH_SIZE = 16
-SEQ_LEN = 16
-LEARNING_STARTS = 2500
-GAMMA = 0.95
-
+SEQ_LEN = 2
+LEARNING_STARTS = 1024
+GAMMA = 1 - (1 / 333)
+ACTOR_ENTROPY = 3e-3
+ACTOR_CRITIC_LR = 1e-3
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -35,7 +32,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def main():
     if not DEBUG:
         run = wandb.init(project="minidream_dev")
-    env = gym.make("CartPole-v1")
+    # env = gym.make("PressTheLightUpButton-v0", size=2, game_length=10, hard_mode=False)
+    env = CriticTestEnv(obs_dependant_reward=True)
 
     replay_buffer = ReplayBuffer(MAX_STEPS, env.action_space, env.observation_space)
 
@@ -58,10 +56,13 @@ def main():
             first = True
             if not DEBUG:
                 run.log({"episode_return": episode_return, "global_step": step})
+            else:
+                print(f"episode return: {episode_return}")
+                # pass
             episode_return = 0
 
         with torch.no_grad():
-            out = actor(torch.tensor(obs).unsqueeze(0).to(device))
+            out = actor(symlog(torch.tensor(obs).unsqueeze(0).to(device)))
             action = torch.distributions.Categorical(logits=out).sample().cpu().item()
         obs, reward, truncated, terminated, _ = env.step(action)
         episode_return += reward
@@ -80,43 +81,56 @@ def main():
 
             data = replay_buffer.sample(BATCH_SIZE, SEQ_LEN).to(device)
             with torch.no_grad():  # TODO dk, should i only call the critic once??
-                values = TwoHotEncodingDistribution(critic(data["obs"]), dims=1).mean  # 16, 64, 1
+                values = TwoHotEncodingDistribution(
+                    critic(symlog(data["obs"])), dims=1
+                ).mean  # 16, 64, 1
             continues = 1.0 - data["done"]
-            lambda_returns = compute_lambda_returns(data["reward"], values, continues)
 
             with torch.no_grad():
-                traj_weight = torch.cumprod(GAMMA * continues, dim=1) / GAMMA
+                # traj_weight = torch.cumprod(GAMMA * continues, dim=1) / GAMMA
+                traj_weight = torch.cumprod(continues, dim=1)
                 traj_weight = traj_weight.squeeze(-1)
+
+            lambda_returns = compute_lambda_returns(
+                data["reward"], values, continues, GAMMA, RETURN_LAMBDA
+            )
+            lambda_returns = lambda_returns * traj_weight[:, :-1].unsqueeze(-1)
+            # print(f"lambda_returns mean: {lambda_returns.mean():.2f}")
 
             critic_opt.zero_grad()
             values_dist = TwoHotEncodingDistribution(
-                critic(data["obs"][:, :-1]),
+                critic(symlog(data["obs"])[:, :-1]),
                 dims=1,
             )
 
             # detach the slow critic bc we don't update its weights with gradient descent
             # we mix it with the critic and we train the critic to approach the output of the slow critic
             slow_values = TwoHotEncodingDistribution(
-                slow_critic(data["obs"][:, :-1]), dims=1
+                slow_critic(symlog(data["obs"])[:, :-1]), dims=1
             ).mean.detach()
+            # print(f"slow values mean: {slow_values.mean():.2f}")
+            # print(f"values mean: {values_dist.mean.detach().mean():.2f}")
             critic_loss = -values_dist.log_prob(lambda_returns.detach())
             critic_loss -= values_dist.log_prob(slow_values)
 
             critic_loss = critic_loss * traj_weight[:, :-1]
             critic_loss = critic_loss.mean()
+            # print(f"critic loss: {critic_loss.item():.2f}")
             critic_loss.backward()
-            torch.nn.utils.clip_grad_norm_(critic.parameters(), ACTOR_GRADIENT_CLIP)
+            critic_grad_norm = torch.nn.utils.clip_grad_norm_(
+                critic.parameters(), ACTOR_GRADIENT_CLIP
+            )
+            # print(f"critic grad norm: {critic_grad_norm:.2f}\n")
             critic_opt.step()
 
             # train the actor
-            actor_opt.zero_grad()
-
             offset, invscale = return_ema(lambda_returns)
             normed_lambda_returns = (lambda_returns - offset) / invscale
             normed_values = (values[:, :-1] - offset) / invscale
             advantage = normed_lambda_returns - normed_values
 
-            policy = torch.distributions.Categorical(logits=actor(data["obs"][:, :-1]))
+            actor_opt.zero_grad()
+            policy = torch.distributions.Categorical(logits=actor(symlog(data["obs"])[:, :-1]))
             logpi = policy.log_prob(data["action"][:, :-1].squeeze(-1))
             actor_loss = -logpi * advantage.detach().squeeze(-1)
             actor_loss -= ACTOR_ENTROPY * policy.entropy()
@@ -130,6 +144,10 @@ def main():
                     {
                         "actor_loss": actor_loss.item(),
                         "critic_loss": critic_loss.item(),
+                        "entropy": policy.entropy().mean().item(),
+                        "advantage": advantage.mean().item(),
+                        "values": values_dist.mean.mean().item(),
+                        "lambda_values": lambda_returns.mean().item(),
                         "global_step": step,
                     }
                 )
