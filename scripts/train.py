@@ -12,7 +12,8 @@ from tqdm import trange
 import wandb
 from minidream.dist import OneHotDist as OneHotCategoricalStraightThrough
 from minidream.dist import TwoHotEncodingDistribution
-from minidream.functional import symlog
+from minidream.envs.lightupbutton import PressTheLightUpButton
+from minidream.functional import compute_lambda_returns, symlog
 from minidream.networks import (
     GRU_RECCURENT_UNITS,
     RSSM,
@@ -175,45 +176,6 @@ def train_step_world_model(
     }
 
 
-def compute_lambda_returns(rewards, values, continues):
-    """Values is the output from the critic rewards are the predicted rewards continues are the
-    predicted continue flags."""
-    horizon = rewards.shape[1] - 1
-    # Eq. 7
-    # lambda return shape should be (B, T, 1)
-    # pred_rewards is (B, T, 1)
-    # pred_values is (B, T, 1)
-    # continues is (B, T, 1)
-    # where T is IMAGINE_HORIZON + 1
-    batch_size = rewards.shape[0]
-    lambda_returns = torch.empty(batch_size, horizon, 1, device=device)
-
-    # we compute the equation by developping it
-    # eq. 7 Rt = rt + GAMMA*Ct ( (1 - LAMBDA) * Vt+1 + LAMBDA * Rt+1)
-    # we first compute rt + GAMMA*Ct * ((1 - LAMBDA) * Vt+1)
-    # then we go from the left to the right of the list/time dimension
-    # and we compute Rt = interm[t] + Ct * GAMMA * LAMBDA * Rt+1
-    # w/ the last RT+1 being the last nn values estimated
-    # rt is the reward at t, Vt the output of the critic at t, Ct the output of the continue network at t
-    # TODO should we offset the values to get Vt+1? -> YES
-    # seems we have to offset continues too? -> yes ofc else it doesn't match the value
-    interm = rewards[:, :-1] + GAMMA * continues[:, 1:] * values[:, 1:] * (
-        1 - RETURN_LAMBDA
-    )  # (B, T, 1)
-
-    for t in reversed(range(horizon)):  # TODO can we use [::-1] synthax
-        # don't have access to rewards after horizon so we use the estimation
-        if t == (horizon - 1):
-            Rt_plus_1 = values[:, -1]
-        else:
-            Rt_plus_1 = lambda_returns[:, t + 1]
-        lambda_returns[:, t] = (
-            interm[:, t] + continues[:, t + 1] * GAMMA * RETURN_LAMBDA * Rt_plus_1
-        )
-
-    return lambda_returns
-
-
 def train_actor_critic(
     data,
     replayed_hts,
@@ -283,7 +245,9 @@ def train_actor_critic(
     # compute the critic target: bootstrapped lambda return
     # ignoring t=0 bc its not imagined
     # and returning B, HORIZON-1, 1 because we use the last value to bootstrap
-    lambda_returns = compute_lambda_returns(pred_rewards, values, continues)  # (B, HORIZON, 1)
+    lambda_returns = compute_lambda_returns(
+        pred_rewards, values, continues, GAMMA, RETURN_LAMBDA
+    )  # (B, HORIZON, 1)
 
     # TODO should we train the actor or the critic first?
     critic_opt.zero_grad()
@@ -393,7 +357,8 @@ def main(cfg: DictConfig):
         run = wandb.init(project="minidream_dev", job_type="train")
 
     # setup env
-    env = gymnasium.make("CartPole-v1")
+    # env = gymnasium.make("CartPole-v1")
+    env = PressTheLightUpButton()
     # env = RescaleObs(env)
     # eval_env = copy.deepcopy(env)
     replay_buffer = ReplayBuffer(REPLAY_CAPACITY, env.action_space, env.observation_space)
@@ -496,3 +461,4 @@ if __name__ == "__main__":
     main()
     # TODO if using the real robot, we should log mcap files to wandb artifacts so that we have a dataset we can later ues to warm start the world model?
     # so that we don't break the robot again?
+    # TODO log grad norm and the actor/critic stuff we're logging in train_ac.py
