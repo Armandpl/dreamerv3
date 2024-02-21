@@ -33,13 +33,14 @@ class ReplayBuffer:
     def __len__(self):
         return self.count
 
-    def sample(self, batch_size, seq_len):
+    def sample(self, batch_size, seq_len, sample_from_first_step: bool = False):
         # sample batch_size trajectories of length seq_len
         trajectories = []
         for _ in range(batch_size):
-            # pick a random index between 0 and len(self.buffer) - seq_len
-            # TODO remove for loop, sample at once from the buffer
-            idx = random.randint(0, self.count - seq_len)
+            if not sample_from_first_step:
+                idx = random.randint(0, self.count - seq_len)
+            else:
+                idx = random.choice(np.where(self.firsts)[0])
             trajectory = TensorDict(
                 {
                     "action": torch.tensor(self.actions[idx : idx + seq_len], dtype=torch.float32),
