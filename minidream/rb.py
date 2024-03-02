@@ -17,18 +17,28 @@ class ReplayBuffer:
         self.terminated = np.empty((max_size, 1), dtype=np.float32)
         self.firsts = np.empty((max_size, 1), dtype=np.float32)
         self.count = 0
+        self.cursor = 0
 
     def add(self, action: np.ndarray, obs: np.ndarray, reward: float, term: bool, first: bool):
         # transition is (at_minus_1: np.ndarray, obs: np.ndarray, reward: float, terminated: bool, first:bool)
-        # TODO will fail if the buffer is full, need to handle that
-        self.actions[self.count] = action
-        self.obs[self.count] = obs
-        self.rewards[self.count] = reward
-        self.terminated[self.count] = float(
+        self.actions[self.cursor] = action
+        self.obs[self.cursor] = obs
+        self.rewards[self.cursor] = reward
+        self.terminated[self.cursor] = float(
             term
         )  # convert bools to floats, useful in the code later
-        self.firsts[self.count] = float(first)
-        self.count += 1
+        self.firsts[self.cursor] = float(first)
+
+        # make the next step the first step of the next trajectory
+        # so that we the replay buffer is full, we don't mix trajectories
+        # by writing over the beggining of a trajectory
+        if self.cursor < self.max_size - 1:
+            self.firsts[self.cursor + 1] = float(True)
+
+        self.cursor += 1
+        if self.count < self.max_size:
+            self.count += 1
+        self.cursor = self.cursor % self.max_size
 
     def __len__(self):
         return self.count
