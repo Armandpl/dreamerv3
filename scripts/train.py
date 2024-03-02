@@ -10,6 +10,7 @@ from torch.distributions.kl import kl_divergence
 from tqdm import trange
 
 import wandb
+from minidream.dist import BernoulliSafeMode
 from minidream.dist import OneHotDist as OneHotCategoricalStraightThrough
 from minidream.dist import TwoHotEncodingDistribution
 from minidream.envs.lightupbutton import PressTheLightUpButton
@@ -29,8 +30,8 @@ DEBUG = False  # wether or not to use wandb
 
 # Tuning the HPs = losing
 # Actor Critic
-# GAMMA = 1 - (1 / 333)
-GAMMA = 0.99
+GAMMA = 1 - (1 / 333)
+# GAMMA = 0.99
 IMAGINE_HORIZON = 15
 RETURN_LAMBDA = 0.95
 ACTOR_ENTROPY = 3e-4
@@ -136,7 +137,7 @@ def train_step_world_model(
     )  # sum over the last dim
 
     continue_loss = -Independent(
-        torch.distributions.Bernoulli(logits=pred_continues),
+        BernoulliSafeMode(logits=pred_continues),
         1,
     ).log_prob(1.0 - data["done"])
     loss_pred = (recon_loss + rew_loss + continue_loss).mean()  # average accross batch and time
@@ -231,7 +232,7 @@ def train_actor_critic(
     # 1. the rest of the batch and 2. the rest of the traj since we predict it from the markov state
     # at least that's what I understand rn
     continues = Independent(
-        torch.distributions.Bernoulli(logits=world_model.continue_model(hts, zts)), 1
+        BernoulliSafeMode(logits=world_model.continue_model(hts, zts)), 1
     ).mode  # TODO can we just do > 0.5?
     # make sur we don't use imagined trajectories from terminal states
     # so get the real termination flags for step=0
@@ -266,7 +267,7 @@ def train_actor_critic(
     critic_loss = critic_loss * sg(traj_weight[:, :-1])
     critic_loss = critic_loss.mean()
     critic_loss.backward()
-    torch.nn.utils.clip_grad_norm_(critic.parameters(), ACTOR_GRADIENT_CLIP)
+    critic_grad_norm = torch.nn.utils.clip_grad_norm_(critic.parameters(), ACTOR_GRADIENT_CLIP)
     critic_opt.step()
 
     # update the slow critic by mixing it with the critic
@@ -282,17 +283,17 @@ def train_actor_critic(
     advantage = normed_lambda_returns - normed_values
 
     policy = actor(
-        sg(hts[:, :-2]),
-        sg(zts[:, :-2]),  # loose one bc of lambda, loose one bc lambda return is at t+1
+        sg(hts[:, :-1]),
+        sg(zts[:, :-1]),  # loose one bc of lambda, loose one bc lambda return is at t+1
     )  # TODO we've done this computation once already, can we cache it?
-    logpi = policy.log_prob(sg(ats[:, :-2]).squeeze(-1))
-    actor_loss = -logpi * sg(advantage[:, 1:].squeeze(-1))
+    logpi = policy.log_prob(sg(ats[:, :-1]).squeeze(-1))
+    actor_loss = -logpi * sg(advantage.squeeze(-1))
     actor_entropy = policy.entropy()
     actor_loss -= ACTOR_ENTROPY * actor_entropy
-    actor_loss = actor_loss * sg(traj_weight[:, :-2])
+    actor_loss = actor_loss * sg(traj_weight[:, :-1])
     actor_loss = actor_loss.mean()
     actor_loss.backward()
-    torch.nn.utils.clip_grad_norm_(actor.parameters(), ACTOR_GRADIENT_CLIP)
+    actor_grad_norm = torch.nn.utils.clip_grad_norm_(actor.parameters(), ACTOR_GRADIENT_CLIP)
     actor_opt.step()
 
     return {
@@ -302,6 +303,8 @@ def train_actor_critic(
         "agent/ema_offset": offset.mean(),
         "agent/ema_invscale": invscale.mean(),
         "agent/entropy": actor_entropy.mean(),
+        "agent/actor_grad_norm": actor_grad_norm,
+        "agent/critic_grad_norm": critic_grad_norm,
     }
 
 
@@ -357,8 +360,8 @@ def main(cfg: DictConfig):
         run = wandb.init(project="minidream_dev", job_type="train")
 
     # setup env
-    # env = gymnasium.make("CartPole-v1")
-    env = PressTheLightUpButton()
+    env = gymnasium.make("CartPole-v1")
+    # env = PressTheLightUpButton()
     # env = RescaleObs(env)
     # eval_env = copy.deepcopy(env)
     replay_buffer = ReplayBuffer(REPLAY_CAPACITY, env.action_space, env.observation_space)
