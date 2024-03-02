@@ -2,7 +2,6 @@ import copy
 
 import gymnasium
 import hydra
-import matplotlib.pyplot as plt
 import torch
 from omegaconf import DictConfig
 from torch.distributions import Independent
@@ -13,7 +12,6 @@ import wandb
 from minidream.dist import BernoulliSafeMode
 from minidream.dist import OneHotDist as OneHotCategoricalStraightThrough
 from minidream.dist import TwoHotEncodingDistribution
-from minidream.envs.lightupbutton import PressTheLightUpButton
 from minidream.functional import compute_lambda_returns, symlog
 from minidream.networks import (
     GRU_RECCURENT_UNITS,
@@ -24,18 +22,15 @@ from minidream.networks import (
 )
 from minidream.rb import ReplayBuffer
 from minidream.utils import count_parameters, sg
-from minidream.wrappers import RescaleObs
 
 DEBUG = False  # wether or not to use wandb
 
 # Tuning the HPs = losing
 # Actor Critic
 GAMMA = 1 - (1 / 333)
-# GAMMA = 0.99
 IMAGINE_HORIZON = 15
 RETURN_LAMBDA = 0.95
 ACTOR_ENTROPY = 3e-4
-# ACTOR_ENTROPY = 3e-3
 ACTOR_CRITIC_LR = 3e-5
 ADAM_EPSILON = 1e-5
 ACTOR_GRADIENT_CLIP = 100.0
@@ -51,7 +46,7 @@ WM_ADAM_EPSILON = 1e-8
 WM_GRADIENT_CLIP = 1000.0  # TODO do we have to clip norm or values? nm512 clips norm
 
 #
-TRAIN_RATIO = 64  # ratio between real steps and imagined steps
+TRAIN_RATIO = 256  # ratio between real steps and imagined steps
 REPLAY_CAPACITY = 1_000_000  # FIFO
 BATCH_SIZE = 16
 BATCH_LENGTH = 64
@@ -421,6 +416,11 @@ def main(cfg: DictConfig):
                 zt_minus_1 = torch.zeros(
                     1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device
                 )
+                # TODO no info to take first action from
+                # could use the first obs to get the first zt
+                # but that means we should do that when training the world model too
+                # we could/should also train on the first obs from reset?
+
                 # zt_dist, _ = world_model.representation_model(
                 #     torch.tensor(obs).unsqueeze(0).to(device), ht_minus_1
                 # )
@@ -453,22 +453,13 @@ def main(cfg: DictConfig):
             data = replay_buffer.sample(cfg.batch_size, cfg.seq_len).to(device)
 
             hts, zts, zts_logits = run_world_model(data, world_model)
-            # train world model 8 times less frequently
-            # TODO that's to debug since cartpole is easy to predict
-            if replay_buffer.count % (cfg.batch_size * cfg.seq_len // TRAIN_RATIO // 8) == 0:
-                wm_loss_dict = train_step_world_model(
-                    data, hts, zts, zts_logits, world_model, wm_opt
-                )
-            else:
-                wm_loss_dict = {}
+            wm_loss_dict = train_step_world_model(data, hts, zts, zts_logits, world_model, wm_opt)
             actor_critic_loss_dict = train_actor_critic(
                 data, hts, zts, world_model, actor, critic, slow_critic, actor_opt, critic_opt
             )
 
             loss_dict = {**wm_loss_dict, **actor_critic_loss_dict}
-            run.log(
-                {**loss_dict, "episode_return": episode_return, "global_step": replay_buffer.count}
-            )
+            run.log({**loss_dict, "global_step": replay_buffer.count})
 
     if not DEBUG:
         run.finish()
@@ -483,4 +474,3 @@ if __name__ == "__main__":
     main()
     # TODO if using the real robot, we should log mcap files to wandb artifacts so that we have a dataset we can later ues to warm start the world model?
     # so that we don't break the robot again?
-    # TODO log grad norm and the actor/critic stuff we're logging in train_ac.py
