@@ -89,3 +89,14 @@ class TwoHotEncodingDistribution:
         ).squeeze(-2)
         log_pred = self.logits - torch.logsumexp(self.logits, dim=-1, keepdims=True)
         return (target * log_pred).sum(dim=self.dims)
+
+
+# https://github.com/Eclectic-Sheep/sheeprl/pull/186
+class BernoulliSafeMode(torch.distributions.Bernoulli):
+    def __init__(self, probs=None, logits=None, validate_args=None):
+        super().__init__(probs, logits, validate_args)
+
+    @property
+    def mode(self):
+        mode = (self.probs > 0.5).to(self.probs)
+        return mode
