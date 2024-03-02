@@ -79,16 +79,13 @@ def run_world_model(data, world_model):
 
     # compute recurrent states
     for i in range(seq_len):
+        at_minus_1 = data["action"][:, i].view(batch_size, 1)
         if i == 0:
-            at_minus_1 = torch.zeros(batch_size, 1, device=device)
             ht_minus_1 = torch.zeros(batch_size, GRU_RECCURENT_UNITS, device=device)
             zt_minus_1 = torch.zeros(
                 batch_size, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device
             )
         else:
-            at_minus_1 = data["action"][:, i].view(
-                batch_size, 1
-            )  # action isn't one hot encoded in the rb
             ht_minus_1 = recurrent_states[:, i - 1].view(batch_size, GRU_RECCURENT_UNITS)
             zt_minus_1 = posteriors[:, i - 1].view(
                 batch_size, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE
@@ -112,7 +109,7 @@ def train_step_world_model(
 
     reconstructed_obs = world_model.decoder(recurrent_states, posteriors)  # (B, T, obs_dim)
     _, priors_logits = world_model.transition_model(recurrent_states)
-    pred_rewards = world_model.reward_model(recurrent_states, posteriors)  # (B, 1)
+    pred_rewards_logits = world_model.reward_model(recurrent_states, posteriors)  # (B, 1)
     pred_continues = world_model.continue_model(recurrent_states, posteriors)  # (B, 1)
 
     priors_logits = priors_logits.view(
@@ -132,9 +129,8 @@ def train_step_world_model(
     )  # got that from the offical implem
     recon_loss = distance.sum(dim=[-1])
 
-    rew_loss = -TwoHotEncodingDistribution(pred_rewards, dims=1).log_prob(
-        data["reward"]
-    )  # sum over the last dim
+    pred_rewards_distrib = TwoHotEncodingDistribution(pred_rewards_logits, dims=1)
+    rew_loss = -pred_rewards_distrib.log_prob(data["reward"])  # sum over the last dim
 
     continue_loss = -Independent(
         BernoulliSafeMode(logits=pred_continues),
@@ -167,13 +163,18 @@ def train_step_world_model(
     torch.nn.utils.clip_grad_norm_(world_model.parameters(), WM_GRADIENT_CLIP)
     optim.step()
     return {
-        "loss/total": loss,
-        "loss/pred": loss_pred,
-        "loss/dyn": loss_dyn,
-        "loss/rep": loss_rep,
-        "loss/recon": recon_loss.mean(),
-        "loss/reward": rew_loss.mean(),
-        "loss/continue": continue_loss.mean(),
+        "sampled_actions_distrib": wandb.Histogram(data["action"].view(-1).cpu().detach().numpy()),
+        "sampled_reward_distrib": wandb.Histogram(data["reward"].view(-1).cpu().detach().numpy()),
+        "pred_rewards_distrib": wandb.Histogram(
+            pred_rewards_distrib.mean.view(-1).cpu().detach().numpy()
+        ),
+        "world_model/total_loss": loss,
+        "world_model/pred_loss": loss_pred,
+        "world_model/dyn_loss": loss_dyn,
+        "world_model/rep_loss": loss_rep,
+        "world_model/recon_loss": recon_loss.mean(),
+        "world_model/reward_loss": rew_loss.mean(),
+        "world_model/continue_loss": continue_loss.mean(),
     }
 
 
@@ -297,8 +298,17 @@ def train_actor_critic(
     actor_opt.step()
 
     return {
-        "agent/actor": actor_loss,
-        "agent/critic": critic_loss,
+        "agent/imagined_actions_distrib": wandb.Histogram(
+            ats.view(-1).to(torch.long).cpu().detach().numpy()
+        ),
+        "agent/pred_values_distrib": wandb.Histogram(values.view(-1).cpu().detach().numpy()),
+        "agent/pred_values_mean": values.mean(),
+        "agent/lambda_values_mean": lambda_returns.mean(),
+        "agent/lambda_values_distrib": wandb.Histogram(
+            lambda_returns.view(-1).cpu().detach().numpy()
+        ),
+        "agent/actor_loss": actor_loss,
+        "agent/critic_loss": critic_loss,
         "agent/advantage": advantage.mean(),
         "agent/ema_offset": offset.mean(),
         "agent/ema_invscale": invscale.mean(),
@@ -308,50 +318,50 @@ def train_actor_critic(
     }
 
 
-def collect_rollout(env, replay_buffer, actor: Actor = None, rssm: RSSM = None):
-    use_actor = actor is not None and rssm is not None
-    with torch.no_grad():
-        obs, _ = env.reset()
-        if use_actor:
-            ht_minus_1 = torch.zeros(1, GRU_RECCURENT_UNITS, device=device)
-            zt_minus_1 = torch.zeros(
-                1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device
-            )
-            zt_dist, _ = rssm.representation_model(
-                torch.tensor(obs).unsqueeze(0).to(device), ht_minus_1
-            )
-            zt_minus_1 = zt_dist.sample()
+# def collect_rollout(env, replay_buffer, actor: Actor = None, rssm: RSSM = None):
+#     use_actor = actor is not None and rssm is not None
+#     with torch.no_grad():
+#         obs, _ = env.reset()
+#         if use_actor:
+#             ht_minus_1 = torch.zeros(1, GRU_RECCURENT_UNITS, device=device)
+#             zt_minus_1 = torch.zeros(
+#                 1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device
+#             )
+#             zt_dist, _ = rssm.representation_model(
+#                 torch.tensor(obs).unsqueeze(0).to(device), ht_minus_1
+#             )
+#             zt_minus_1 = zt_dist.sample()
 
-        done = False
-        first = True
-        episode_return = 0
+#         done = False
+#         first = True
+#         episode_return = 0
 
-        while not done:
-            if use_actor:
-                act_dist = actor(ht_minus_1, zt_minus_1)
-                act = act_dist.sample()
-                act = act.unsqueeze(0)
-                ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
-                act = act.cpu()
-            else:
-                act = env.action_space.sample()
+#         while not done:
+#             if use_actor:
+#                 act_dist = actor(ht_minus_1, zt_minus_1)
+#                 act = act_dist.sample()
+#                 act = act.unsqueeze(0)
+#                 ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
+#                 act = act.cpu()
+#             else:
+#                 act = env.action_space.sample()
 
-            obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
-            episode_return += reward
+#             obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
+#             episode_return += reward
 
-            if use_actor:
-                zt_dist, _ = rssm.representation_model(
-                    torch.tensor(obs).to(device).unsqueeze(0), ht_minus_1
-                )
-                zt_minus_1 = zt_dist.sample()
+#             if use_actor:
+#                 zt_dist, _ = rssm.representation_model(
+#                     torch.tensor(obs).to(device).unsqueeze(0), ht_minus_1
+#                 )
+#                 zt_minus_1 = zt_dist.sample()
 
-            done = terminated or truncated
+#             done = terminated or truncated
 
-            if replay_buffer is not None:
-                # replay_buffer.add(act, obs, reward, terminated, first)
-                replay_buffer.add(act, obs, reward, done, first)
-            first = False
-    return episode_return
+#             if replay_buffer is not None:
+#                 # replay_buffer.add(act, obs, reward, terminated, first)
+#                 replay_buffer.add(act, obs, reward, done, first)
+#             first = False
+#     return episode_return
 
 
 @hydra.main(version_base="1.3", config_path="configs", config_name="train.yaml")
@@ -390,12 +400,20 @@ def main(cfg: DictConfig):
     print("Training")
     done = True
     episode_return = 0
+    episode_len = 0
     for _ in trange(cfg.max_steps):
 
         if done:
             if not DEBUG:
-                run.log({"episode_return": episode_return, "global_step": replay_buffer.count})
+                run.log(
+                    {
+                        "episode_return": episode_return,
+                        "episode_len": episode_len,
+                        "global_step": replay_buffer.count,
+                    }
+                )
             episode_return = 0
+            episode_len = 0
             obs, _ = env.reset()
             first = True
             with torch.no_grad():
@@ -403,10 +421,10 @@ def main(cfg: DictConfig):
                 zt_minus_1 = torch.zeros(
                     1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device
                 )
-                zt_dist, _ = world_model.representation_model(
-                    torch.tensor(obs).unsqueeze(0).to(device), ht_minus_1
-                )
-                zt_minus_1 = zt_dist.sample()
+                # zt_dist, _ = world_model.representation_model(
+                #     torch.tensor(obs).unsqueeze(0).to(device), ht_minus_1
+                # )
+                # zt_minus_1 = zt_dist.sample()
 
         # choose action w/ actor
         with torch.no_grad():
@@ -414,11 +432,12 @@ def main(cfg: DictConfig):
             act = act_dist.sample()
             act = act.unsqueeze(0)
             ht_minus_1 = world_model.recurrent_model(ht_minus_1, zt_minus_1, act)
-            act = act.cpu()
+            act = act.cpu().squeeze(0).item()
 
-        obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
+        obs, reward, terminated, truncated, _ = env.step(act)
         done = terminated or truncated
         episode_return += reward
+        episode_len += 1
         replay_buffer.add(act, obs, reward, done, first)
         first = False
 
