@@ -185,7 +185,7 @@ class RecurrentModel(nn.Module):
         mlp_out = mlp_out.unsqueeze(1)  # (batch_size, 1, 128)
         ht_minus_1 = ht_minus_1.unsqueeze(0)  # (1, batch_size, 128)
         ht = self.GRU(mlp_out, ht_minus_1.contiguous())  # TODO why do we need to call contiguous?
-        ht = ht.squeeze(0)  # (batch_size, 128)
+        ht = ht.squeeze(0)  # (batch_size, GRU_RECCURENT_UNITS)
         return ht
 
 
@@ -245,7 +245,7 @@ class Actor(nn.Module):
         # TODO we need an actor for continuous action
         # do we model a normal dist in this case?
         output = self.net(ht, zt)
-        dist = torch.distributions.Categorical(logits=output)
+        dist = torch.distributions.Categorical(logits=output)  # TODO add unimix?
         return dist
 
 
