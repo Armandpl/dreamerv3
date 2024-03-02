@@ -12,7 +12,7 @@ class ReplayBuffer:
     ):
         self.max_size = max_size
         self.actions = np.empty((max_size, 1), dtype=np.float32)
-        self.obs = np.empty((max_size, obs_space.shape[0]), dtype=np.float32)
+        self.obs = np.empty((max_size, *obs_space.shape), dtype=np.float32)
         self.rewards = np.empty((max_size, 1), dtype=np.float32)
         self.terminated = np.empty((max_size, 1), dtype=np.float32)
         self.firsts = np.empty((max_size, 1), dtype=np.float32)
