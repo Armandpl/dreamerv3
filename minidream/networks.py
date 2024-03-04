@@ -12,9 +12,13 @@ from minidream.functional import symlog
 
 GRU_RECCURENT_UNITS = 512
 DENSE_HIDDEN_UNITS = 512
-NLP_NB_HIDDEN_LAYERS = 2
+MLP_NB_HIDDEN_LAYERS = 2
 STOCHASTIC_STATE_SIZE = 32
 TWOHOTBUCKETS = 255
+
+
+CNN_MULTIPLIER = 32
+CNN_STAGES = 4
 
 
 def weight_init(m: nn.Module):
@@ -56,7 +60,7 @@ def uniform_init_weights(given_scale):  # TODO same here, why not torch.nn.init.
 def make_mlp(
     input_dim,
     output_dim,
-    nb_layers=NLP_NB_HIDDEN_LAYERS,
+    nb_layers=MLP_NB_HIDDEN_LAYERS,
     hidden_dim=DENSE_HIDDEN_UNITS,
 ):
     """
@@ -79,6 +83,36 @@ def make_mlp(
     return net
 
 
+def make_cnn(
+    input_channels=4,
+    stages=CNN_STAGES,
+    multiplier=CNN_MULTIPLIER,
+    deconv=False,
+):
+    layers = []
+    channels = [input_channels]
+    channels += [i * 2 * multiplier for i in range(1, stages + 1)]
+    if deconv:
+        channels = channels[::-1]
+        layer = torch.nn.ConvTranspose2d
+    else:
+        layer = torch.nn.Conv2d
+
+    for i in range(len(channels) - 1):
+        layers.append(
+            layer(
+                in_channels=channels[i],
+                out_channels=channels[i + 1],
+                kernel_size=4,
+                stride=1,
+                padding=1,
+            )
+        )
+        layers.append(torch.nn.SiLU())
+
+    return torch.nn.Sequential(*layers)
+
+
 class RSSM(nn.Module):
     def __init__(
         self, observation_space: gymnasium.spaces.Box, action_space: gymnasium.spaces.Discrete
@@ -86,8 +120,12 @@ class RSSM(nn.Module):
         super().__init__()
         self.observation_space = observation_space
         self.action_space = action_space
+        self.encoder = Encoder(observation_space)
+        c, h, w = observation_space.shape
+        cnn_output_dim = self.encoder(torch.zeros(1, c, h, w)).shape[1:]
         self.representation_model = RepresentationModel(
-            observation_space=observation_space,
+            # observation_space=observation_space,
+            input_dim=np.prod(cnn_output_dim)
         )
         self.recurrent_model = RecurrentModel(
             action_space=action_space,
@@ -95,6 +133,7 @@ class RSSM(nn.Module):
         self.transition_model = TransitionModel()
         self.decoder = Decoder(
             observation_space=observation_space,
+            # cnn_output_dim=cnn_output_dim,
         )
         self.reward_model = PredModel(TWOHOTBUCKETS, output_init=uniform_init_weights(0.0))
         self.continue_model = PredModel(1, output_init=uniform_init_weights(1.0))
@@ -127,12 +166,13 @@ class RepresentationModel(nn.Module):  # TODO GRU w/ layer norm
 
     def __init__(
         self,
-        observation_space: gymnasium.spaces.Box,
+        # observation_space: gymnasium.spaces.Box,
+        input_dim: int,
     ):
         super().__init__()
 
         self.net = make_mlp(
-            input_dim=observation_space.shape[0] + GRU_RECCURENT_UNITS,
+            input_dim=input_dim + GRU_RECCURENT_UNITS,
             output_dim=STOCHASTIC_STATE_SIZE**2,
         )
         self.net[-1].apply(uniform_init_weights(1.0))
@@ -223,16 +263,43 @@ class Decoder(nn.Module):
     def __init__(
         self,
         observation_space: gymnasium.spaces.Box,
+        cnn_output_dim=(256, 6, 6),
     ):
         super().__init__()
-        self.net = make_mlp(
+        self.cnn_output_dim = cnn_output_dim
+        self.mlp = make_mlp(
             input_dim=STOCHASTIC_STATE_SIZE**2 + GRU_RECCURENT_UNITS,
-            output_dim=observation_space.shape[0],
+            output_dim=np.prod(cnn_output_dim),
         )
+        self.decnn = make_cnn(deconv=True, input_channels=observation_space.shape[0])
 
     def forward(self, ht, zt):
-        zt = torch.flatten(zt, start_dim=-2)  # flatten
-        return self.net(torch.cat([ht, zt], dim=-1))
+        zt = torch.flatten(zt, start_dim=-2)
+        to_deconv = self.mlp(torch.cat([ht, zt], dim=-1))
+        shape = to_deconv.shape
+        to_deconv = torch.unflatten(to_deconv, dim=-1, sizes=self.cnn_output_dim)
+        to_deconv = to_deconv.view(-1, *self.cnn_output_dim)
+        deconved = self.decnn(to_deconv)
+        deconved = deconved.view(*shape[:-1], *deconved.shape[1:])
+        return deconved
+
+
+class Encoder(nn.Module):
+    """Encoder the observed image."""
+
+    def __init__(
+        self,
+        observation_space: gymnasium.spaces.Box,
+    ):
+        super().__init__()
+        self.net = make_cnn(input_channels=observation_space.shape[0])
+
+    def forward(self, x):
+        # x is of shape (..., c, h, w)
+        c, h, w = x.shape[-3:]
+        encoded = self.net(x.view(-1, c, h, w))
+
+        return encoded.view(*x.shape[:-3], -1)
 
 
 class Actor(nn.Module):

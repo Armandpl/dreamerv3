@@ -25,3 +25,24 @@ class RescaleObs(gym.Wrapper):
         obs = 2 * (obs - self.low) / self.range - 1
 
         return obs, reward, terminated, truncated, info
+
+
+class PreProcessMinatar(gym.Wrapper):
+    """Transpose obs to have channel first convert from bool to float and rescale to [-1, 1]"""
+
+    def __init__(self, env: gym.Env):
+        super().__init__(env)
+
+        h, w, c = self.env.observation_space.shape
+
+        self.observation_space = gym.spaces.Box(
+            low=-1.0, high=1.0, shape=(c, h, w), dtype=np.float32
+        )
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+
+        obs = obs.transpose(2, 0, 1)
+        obs = obs.astype(np.float32) * 2 - 1
+
+        return obs, reward, terminated, truncated, info

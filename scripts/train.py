@@ -22,6 +22,7 @@ from minidream.networks import (
 )
 from minidream.rb import ReplayBuffer
 from minidream.utils import count_parameters, sg
+from minidream.wrappers import PreProcessMinatar
 
 DEBUG = False  # wether or not to use wandb
 
@@ -46,7 +47,7 @@ WM_ADAM_EPSILON = 1e-8
 WM_GRADIENT_CLIP = 1000.0  # TODO do we have to clip norm or values? nm512 clips norm
 
 #
-TRAIN_RATIO = 256  # ratio between real steps and imagined steps
+TRAIN_RATIO = 64  # ratio between real steps and imagined steps
 REPLAY_CAPACITY = 1_000_000  # FIFO
 BATCH_SIZE = 16
 BATCH_LENGTH = 64
@@ -72,6 +73,9 @@ def run_world_model(data, world_model):
         device=device,
     )
 
+    # encode images
+    encoded_images = world_model.encoder(data["obs"])  # (B, T, obs_dim)
+
     # compute recurrent states
     for i in range(seq_len):
         at_minus_1 = data["action"][:, i].view(batch_size, 1)
@@ -87,7 +91,7 @@ def run_world_model(data, world_model):
             )
 
         (recurrent_states[:, i], posteriors[:, i], posteriors_logits[:, i],) = world_model.forward(
-            data["obs"][:, i], at_minus_1, ht_minus_1, zt_minus_1, is_first=data["first"][:, i]
+            encoded_images[:, i], at_minus_1, ht_minus_1, zt_minus_1, is_first=data["first"][:, i]
         )
     return recurrent_states, posteriors, posteriors_logits
 
@@ -122,7 +126,7 @@ def train_step_world_model(
     distance = torch.where(
         distance < MIN_SYMLOG_DISTANCE, 0, distance
     )  # got that from the offical implem
-    recon_loss = distance.sum(dim=[-1])
+    recon_loss = distance.sum(dim=[-1, -2, -3])  # TODO -1 for vector obs, -3 for image obs
 
     pred_rewards_distrib = TwoHotEncodingDistribution(pred_rewards_logits, dims=1)
     rew_loss = -pred_rewards_distrib.log_prob(data["reward"])  # sum over the last dim
@@ -313,50 +317,49 @@ def train_actor_critic(
     }
 
 
-# def collect_rollout(env, replay_buffer, actor: Actor = None, rssm: RSSM = None):
-#     use_actor = actor is not None and rssm is not None
-#     with torch.no_grad():
-#         obs, _ = env.reset()
-#         if use_actor:
-#             ht_minus_1 = torch.zeros(1, GRU_RECCURENT_UNITS, device=device)
-#             zt_minus_1 = torch.zeros(
-#                 1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device
-#             )
-#             zt_dist, _ = rssm.representation_model(
-#                 torch.tensor(obs).unsqueeze(0).to(device), ht_minus_1
-#             )
-#             zt_minus_1 = zt_dist.sample()
+def collect_rollout(env, replay_buffer, actor: Actor = None, rssm: RSSM = None):
+    use_actor = actor is not None and rssm is not None
+    with torch.no_grad():
+        obs, _ = env.reset()
+        if use_actor:
+            ht_minus_1 = torch.zeros(1, GRU_RECCURENT_UNITS, device=device)
+            zt_minus_1 = torch.zeros(
+                1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device
+            )
+            # zt_dist, _ = rssm.representation_model(
+            #     torch.tensor(obs).unsqueeze(0).to(device), ht_minus_1
+            # )
+            # zt_minus_1 = zt_dist.sample()
 
-#         done = False
-#         first = True
-#         episode_return = 0
+        done = False
+        first = True
+        episode_return = 0
 
-#         while not done:
-#             if use_actor:
-#                 act_dist = actor(ht_minus_1, zt_minus_1)
-#                 act = act_dist.sample()
-#                 act = act.unsqueeze(0)
-#                 ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
-#                 act = act.cpu()
-#             else:
-#                 act = env.action_space.sample()
+        while not done:
+            if use_actor:
+                act_dist = actor(ht_minus_1, zt_minus_1)
+                act = act_dist.sample()
+                act = act.unsqueeze(0)
+                ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
+                act = act.cpu()
+            else:
+                act = env.action_space.sample()
 
-#             obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
-#             episode_return += reward
+            obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
+            episode_return += reward
 
-#             if use_actor:
-#                 zt_dist, _ = rssm.representation_model(
-#                     torch.tensor(obs).to(device).unsqueeze(0), ht_minus_1
-#                 )
-#                 zt_minus_1 = zt_dist.sample()
+            if use_actor:
+                encoded_obs = rssm.encoder(torch.tensor(obs).unsqueeze(0).to(device))
+                zt_dist, _ = rssm.representation_model(encoded_obs, ht_minus_1)
+                zt_minus_1 = zt_dist.sample()
 
-#             done = terminated or truncated
+            done = terminated or truncated
 
-#             if replay_buffer is not None:
-#                 # replay_buffer.add(act, obs, reward, terminated, first)
-#                 replay_buffer.add(act, obs, reward, done, first)
-#             first = False
-#     return episode_return
+            if replay_buffer is not None:
+                # replay_buffer.add(act, obs, reward, terminated, first)
+                replay_buffer.add(act, obs, reward, done, first)
+            first = False
+    return episode_return
 
 
 @hydra.main(version_base="1.3", config_path="configs", config_name="train.yaml")
@@ -365,10 +368,9 @@ def main(cfg: DictConfig):
         run = wandb.init(project="minidream_dev", job_type="train")
 
     # setup env
-    env = gymnasium.make("CartPole-v1")
-    # env = PressTheLightUpButton()
-    # env = RescaleObs(env)
-    # eval_env = copy.deepcopy(env)
+    # env = gymnasium.make("CartPole-v1")
+    env = gymnasium.make("MinAtar/Breakout-v1")
+    env = PreProcessMinatar(env)
     replay_buffer = ReplayBuffer(REPLAY_CAPACITY, env.action_space, env.observation_space)
 
     # setup models and opts
@@ -396,7 +398,7 @@ def main(cfg: DictConfig):
     done = True
     episode_return = 0
     episode_len = 0
-    for _ in trange(cfg.max_steps):
+    for global_step in trange(cfg.max_steps):
 
         if done:
             if not DEBUG:
@@ -404,7 +406,7 @@ def main(cfg: DictConfig):
                     {
                         "episode_return": episode_return,
                         "episode_len": episode_len,
-                        "global_step": replay_buffer.count,
+                        "global_step": global_step,
                     }
                 )
             episode_return = 0
@@ -442,9 +444,8 @@ def main(cfg: DictConfig):
         first = False
 
         # encode obs
-        zt_dist, _ = world_model.representation_model(
-            torch.tensor(obs).to(device).unsqueeze(0), ht_minus_1
-        )
+        encoded_obs = world_model.encoder(torch.tensor(obs).unsqueeze(0).to(device))
+        zt_dist, _ = world_model.representation_model(encoded_obs, ht_minus_1)
         zt_minus_1 = zt_dist.sample()
 
         if (
@@ -459,7 +460,8 @@ def main(cfg: DictConfig):
             )
 
             loss_dict = {**wm_loss_dict, **actor_critic_loss_dict}
-            run.log({**loss_dict, "global_step": replay_buffer.count})
+            if not DEBUG:
+                run.log({**loss_dict, "global_step": global_step})
 
     if not DEBUG:
         run.finish()
