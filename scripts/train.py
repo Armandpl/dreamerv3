@@ -47,7 +47,7 @@ WM_ADAM_EPSILON = 1e-8
 WM_GRADIENT_CLIP = 1000.0  # TODO do we have to clip norm or values? nm512 clips norm
 
 #
-TRAIN_RATIO = 32  # ratio between real steps and imagined steps
+TRAIN_RATIO = 64  # ratio between real steps and imagined steps
 REPLAY_CAPACITY = 1_000_000  # FIFO
 BATCH_SIZE = 16
 BATCH_LENGTH = 64
@@ -399,7 +399,7 @@ def main(cfg: DictConfig):
     done = True
     episode_return = 0
     episode_len = 0
-    for _ in trange(cfg.max_steps):
+    for global_step in trange(cfg.max_steps):
 
         if done:
             if not DEBUG:
@@ -407,7 +407,7 @@ def main(cfg: DictConfig):
                     {
                         "episode_return": episode_return,
                         "episode_len": episode_len,
-                        "global_step": replay_buffer.count,
+                        "global_step": global_step,
                     }
                 )
             episode_return = 0
@@ -462,7 +462,7 @@ def main(cfg: DictConfig):
 
             loss_dict = {**wm_loss_dict, **actor_critic_loss_dict}
             if not DEBUG:
-                run.log({**loss_dict, "global_step": replay_buffer.count})
+                run.log({**loss_dict, "global_step": global_step})
 
     if not DEBUG:
         run.finish()
