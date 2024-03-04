@@ -317,50 +317,49 @@ def train_actor_critic(
     }
 
 
-# def collect_rollout(env, replay_buffer, actor: Actor = None, rssm: RSSM = None):
-#     use_actor = actor is not None and rssm is not None
-#     with torch.no_grad():
-#         obs, _ = env.reset()
-#         if use_actor:
-#             ht_minus_1 = torch.zeros(1, GRU_RECCURENT_UNITS, device=device)
-#             zt_minus_1 = torch.zeros(
-#                 1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device
-#             )
-#             zt_dist, _ = rssm.representation_model(
-#                 torch.tensor(obs).unsqueeze(0).to(device), ht_minus_1
-#             )
-#             zt_minus_1 = zt_dist.sample()
+def collect_rollout(env, replay_buffer, actor: Actor = None, rssm: RSSM = None):
+    use_actor = actor is not None and rssm is not None
+    with torch.no_grad():
+        obs, _ = env.reset()
+        if use_actor:
+            ht_minus_1 = torch.zeros(1, GRU_RECCURENT_UNITS, device=device)
+            zt_minus_1 = torch.zeros(
+                1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device
+            )
+            # zt_dist, _ = rssm.representation_model(
+            #     torch.tensor(obs).unsqueeze(0).to(device), ht_minus_1
+            # )
+            # zt_minus_1 = zt_dist.sample()
 
-#         done = False
-#         first = True
-#         episode_return = 0
+        done = False
+        first = True
+        episode_return = 0
 
-#         while not done:
-#             if use_actor:
-#                 act_dist = actor(ht_minus_1, zt_minus_1)
-#                 act = act_dist.sample()
-#                 act = act.unsqueeze(0)
-#                 ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
-#                 act = act.cpu()
-#             else:
-#                 act = env.action_space.sample()
+        while not done:
+            if use_actor:
+                act_dist = actor(ht_minus_1, zt_minus_1)
+                act = act_dist.sample()
+                act = act.unsqueeze(0)
+                ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
+                act = act.cpu()
+            else:
+                act = env.action_space.sample()
 
-#             obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
-#             episode_return += reward
+            obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
+            episode_return += reward
 
-#             if use_actor:
-#                 zt_dist, _ = rssm.representation_model(
-#                     torch.tensor(obs).to(device).unsqueeze(0), ht_minus_1
-#                 )
-#                 zt_minus_1 = zt_dist.sample()
+            if use_actor:
+                encoded_obs = rssm.encoder(torch.tensor(obs).unsqueeze(0).to(device))
+                zt_dist, _ = rssm.representation_model(encoded_obs, ht_minus_1)
+                zt_minus_1 = zt_dist.sample()
 
-#             done = terminated or truncated
+            done = terminated or truncated
 
-#             if replay_buffer is not None:
-#                 # replay_buffer.add(act, obs, reward, terminated, first)
-#                 replay_buffer.add(act, obs, reward, done, first)
-#             first = False
-#     return episode_return
+            if replay_buffer is not None:
+                # replay_buffer.add(act, obs, reward, terminated, first)
+                replay_buffer.add(act, obs, reward, done, first)
+            first = False
+    return episode_return
 
 
 @hydra.main(version_base="1.3", config_path="configs", config_name="train.yaml")
