@@ -9,9 +9,11 @@ from torch.distributions.kl import kl_divergence
 from tqdm import trange
 
 import wandb
-from minidream.dist import BernoulliSafeMode
-from minidream.dist import OneHotDist as OneHotCategoricalStraightThrough
-from minidream.dist import TwoHotEncodingDistribution
+from minidream.distributions import (
+    BernoulliSafeMode,
+    OneHotCategoricalStraightThroughUnimix,
+    TwoHotEncodingDistribution,
+)
 from minidream.functional import compute_lambda_returns, symlog
 from minidream.networks import (
     GRU_RECCURENT_UNITS,
@@ -20,8 +22,8 @@ from minidream.networks import (
     Actor,
     Critic,
 )
-from minidream.rb import ReplayBuffer
-from minidream.utils import count_parameters, sg
+from minidream.replay_buffer import ReplayBuffer
+from minidream.utils import count_parameters
 from minidream.wrappers import PreProcessMinatar
 
 DEBUG = False  # wether or not to use wandb
@@ -44,16 +46,25 @@ BETA_REP = 0.1
 MIN_SYMLOG_DISTANCE = 1e-8
 WM_LR = 1e-4
 WM_ADAM_EPSILON = 1e-8
-WM_GRADIENT_CLIP = 1000.0  # TODO do we have to clip norm or values? nm512 clips norm
+WM_GRADIENT_CLIP = 1000.0
 
-#
-TRAIN_RATIO = 64  # ratio between real steps and imagined steps
-REPLAY_CAPACITY = 1_000_000  # FIFO
+# Training
+REPLAY_CAPACITY = 1_000_000
 BATCH_SIZE = 16
-BATCH_LENGTH = 64
+SEQ_LEN = 64
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+# TODO use sg in the same place it was used in the paper equations
+# else use torch.no_grad()
+# TODO double check to make sure we don't detached not attached tensors
+# are already detached ones
+# to save chars, for readability
+# put it at the top of the code so ppl that haven't read the the paper don't get confused
+def sg(x):
+    return x.detach()
 
 
 def run_world_model(data, world_model):
@@ -143,17 +154,17 @@ def train_step_world_model(
     loss_dyn = torch.max(
         free_nats,
         kl_divergence(
-            Independent(OneHotCategoricalStraightThrough(logits=posteriors_logits.detach()), 1),
-            Independent(OneHotCategoricalStraightThrough(logits=priors_logits), 1),
+            Independent(OneHotCategoricalStraightThroughUnimix(logits=sg(posteriors_logits)), 1),
+            Independent(OneHotCategoricalStraightThroughUnimix(logits=priors_logits), 1),
         ).mean(),
     )
     loss_rep = torch.max(
         free_nats,
         kl_divergence(
             Independent(  # independant is so that each event is independant
-                OneHotCategoricalStraightThrough(logits=posteriors_logits), 1
+                OneHotCategoricalStraightThroughUnimix(logits=posteriors_logits), 1
             ),
-            Independent(OneHotCategoricalStraightThrough(logits=priors_logits.detach()), 1),
+            Independent(OneHotCategoricalStraightThroughUnimix(logits=sg(priors_logits)), 1),
         ).mean(),
     )
 
@@ -298,13 +309,13 @@ def train_actor_critic(
 
     return {
         "agent/imagined_actions_distrib": wandb.Histogram(
-            ats.view(-1).to(torch.long).cpu().detach().numpy()
+            ats.view(-1).to(torch.long).detach().cpu().numpy()
         ),
         "agent/pred_values_distrib": wandb.Histogram(values.view(-1).cpu().detach().numpy()),
         "agent/pred_values_mean": values.mean(),
         "agent/lambda_values_mean": lambda_returns.mean(),
         "agent/lambda_values_distrib": wandb.Histogram(
-            lambda_returns.view(-1).cpu().detach().numpy()
+            lambda_returns.view(-1).detach().cpu().numpy()
         ),
         "agent/actor_loss": actor_loss,
         "agent/critic_loss": critic_loss,
@@ -368,10 +379,10 @@ def main(cfg: DictConfig):
         run = wandb.init(project="minidream_dev", job_type="train")
 
     # setup env
-    # env = gymnasium.make("CartPole-v1")
-    env = gymnasium.make("MinAtar/Breakout-v1")
-    env = PreProcessMinatar(env)
-    replay_buffer = ReplayBuffer(REPLAY_CAPACITY, env.action_space, env.observation_space)
+    env = gymnasium.make("CartPole-v1")
+    # env = gymnasium.make("MinAtar/Breakout-v1")
+    # env = PreProcessMinatar(env)
+    replay_buffer = ReplayBuffer(min(REPLAY_CAPACITY, cfg.max_steps), env.observation_space)
 
     # setup models and opts
     world_model = RSSM(
@@ -449,9 +460,9 @@ def main(cfg: DictConfig):
         zt_minus_1 = zt_dist.sample()
 
         if (
-            replay_buffer.count % (cfg.batch_size * cfg.seq_len // TRAIN_RATIO) == 0
+            replay_buffer.count % (BATCH_SIZE * SEQ_LEN // cfg.train_ratio) == 0
         ) and replay_buffer.count > cfg.learning_starts:  # should train
-            data = replay_buffer.sample(cfg.batch_size, cfg.seq_len).to(device)
+            data = replay_buffer.sample(BATCH_SIZE, SEQ_LEN).to(device)
 
             hts, zts, zts_logits = run_world_model(data, world_model)
             wm_loss_dict = train_step_world_model(data, hts, zts, zts_logits, world_model, wm_opt)
@@ -470,6 +481,8 @@ def main(cfg: DictConfig):
     torch.save(world_model.state_dict(), "../data/world_model.pth")
     torch.save(actor.state_dict(), "../data/actor.pth")
     # TODO write inference script
+
+    # TODO record and log a video of the agent
 
 
 if __name__ == "__main__":
