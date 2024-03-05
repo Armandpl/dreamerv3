@@ -22,98 +22,6 @@ CNN_MULTIPLIER = 32
 CNN_STAGES = 4
 
 
-def weight_init(m: nn.Module):
-    # TODO why not use torch.init.normal_ ???
-    if isinstance(m, nn.Linear):
-        in_num = m.in_features
-        out_num = m.out_features
-        denoms = (in_num + out_num) / 2.0
-        scale = 1.0 / denoms
-        std = np.sqrt(scale) / 0.87962566103423978  # TODO why not torch.sqrt???
-        nn.init.trunc_normal_(m.weight.data, mean=0.0, std=std, a=-2.0 * std, b=2.0 * std)
-        if hasattr(m.bias, "data"):
-            m.bias.data.fill_(0.0)
-    elif isinstance(m, nn.LayerNorm):
-        m.weight.data.fill_(1.0)
-        if hasattr(m.bias, "data"):
-            m.bias.data.fill_(0.0)
-
-
-def uniform_init_weights(given_scale):  # TODO same here, why not torch.nn.init.uniform_?
-    def f(m):
-        if isinstance(m, nn.Linear):
-            in_num = m.in_features
-            out_num = m.out_features
-            denoms = (in_num + out_num) / 2.0
-            scale = given_scale / denoms
-            limit = np.sqrt(3 * scale)
-            nn.init.uniform_(m.weight.data, a=-limit, b=limit)
-            if hasattr(m.bias, "data"):
-                m.bias.data.fill_(0.0)
-        elif isinstance(m, nn.LayerNorm):
-            m.weight.data.fill_(1.0)
-            if hasattr(m.bias, "data"):
-                m.bias.data.fill_(0.0)
-
-    return f
-
-
-def make_mlp(
-    input_dim,
-    output_dim,
-    nb_layers=MLP_NB_HIDDEN_LAYERS,
-    hidden_dim=DENSE_HIDDEN_UNITS,
-):
-    """
-    output_zero_init: initializes the weights of the output layer to 0 bc:
-    "We further noticed that the randomly
-    initialized reward predictor and critic networks at the start of training can result in large predicted
-    rewards that can delay the onset of learning. We initialize the output weights of the reward predictor
-    and critic to zeros, which effectively alleviates the problem and accelerates early learning." page 7
-    """
-    layers = []
-    for i in range(nb_layers + 1):  # +1 for the input layer
-        layers.append(nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim))
-        layers.append(nn.LayerNorm(hidden_dim))
-        layers.append(nn.SiLU())
-    output_layer = nn.Linear(hidden_dim, output_dim)
-    layers.append(output_layer)
-    net = nn.Sequential(*layers)
-    net.apply(weight_init)
-
-    return net
-
-
-def make_cnn(
-    input_channels=4,
-    stages=CNN_STAGES,
-    multiplier=CNN_MULTIPLIER,
-    deconv=False,
-):
-    layers = []
-    channels = [input_channels]
-    channels += [i * 2 * multiplier for i in range(1, stages + 1)]
-    if deconv:
-        channels = channels[::-1]
-        layer = torch.nn.ConvTranspose2d
-    else:
-        layer = torch.nn.Conv2d
-
-    for i in range(len(channels) - 1):
-        layers.append(
-            layer(
-                in_channels=channels[i],
-                out_channels=channels[i + 1],
-                kernel_size=4,
-                stride=1,
-                padding=1,
-            )
-        )
-        layers.append(torch.nn.SiLU())
-
-    return torch.nn.Sequential(*layers)
-
-
 class RSSM(nn.Module):
     def __init__(
         self, observation_space: gymnasium.spaces.Box, action_space: gymnasium.spaces.Discrete
@@ -121,12 +29,28 @@ class RSSM(nn.Module):
         super().__init__()
         self.observation_space = observation_space
         self.action_space = action_space
-        self.encoder = Encoder(observation_space)
-        c, h, w = observation_space.shape
-        cnn_output_dim = self.encoder(torch.zeros(1, c, h, w)).shape[1:]
+
+        if len(observation_space.shape) == 3:
+            img_obs = True
+        elif len(observation_space.shape) == 1:
+            img_obs = False
+        else:
+            raise ValueError(
+                f"Observation space must be an image or a vector. observation_space.shape: {observation_space.shape}"
+            )
+
+        if img_obs:
+            self.encoder = Encoder(observation_space)
+            c, h, w = observation_space.shape
+            cnn_output_dim = self.encoder(torch.zeros(1, c, h, w)).shape[1:]
+        else:
+            self.encoder = nn.Identity()
+
         self.representation_model = RepresentationModel(
             # observation_space=observation_space,
             input_dim=np.prod(cnn_output_dim)
+            if img_obs
+            else observation_space.shape[0],
         )
         self.recurrent_model = RecurrentModel(
             action_space=action_space,
@@ -134,7 +58,9 @@ class RSSM(nn.Module):
         self.transition_model = TransitionModel()
         self.decoder = Decoder(
             observation_space=observation_space,
-            # cnn_output_dim=cnn_output_dim,
+            cnn_output_dim=(256, 6, 6)
+            if img_obs
+            else None,  # TODO get the outputs from the encoder
         )
         self.reward_model = PredModel(TWOHOTBUCKETS, output_init=uniform_init_weights(0.0))
         self.continue_model = PredModel(1, output_init=uniform_init_weights(1.0))
@@ -268,17 +194,28 @@ class Decoder(nn.Module):
     ):
         super().__init__()
         self.cnn_output_dim = cnn_output_dim
+        if cnn_output_dim is not None:
+            self.decnn = make_cnn(deconv=True, input_channels=observation_space.shape[0])
+
         self.mlp = make_mlp(
             input_dim=STOCHASTIC_STATE_SIZE**2 + GRU_RECCURENT_UNITS,
-            output_dim=np.prod(cnn_output_dim),
+            output_dim=np.prod(cnn_output_dim)
+            if cnn_output_dim is not None
+            else observation_space.shape[0],
         )
-        self.decnn = make_cnn(deconv=True, input_channels=observation_space.shape[0])
 
     def forward(self, ht, zt):
         zt = torch.flatten(zt, start_dim=-2)
-        to_deconv = self.mlp(torch.cat([ht, zt], dim=-1))
-        shape = to_deconv.shape
-        to_deconv = torch.unflatten(to_deconv, dim=-1, sizes=self.cnn_output_dim)
+        mlp_out = self.mlp(torch.cat([ht, zt], dim=-1))
+
+        # if obs is not an image, return the mlp output
+        if self.cnn_output_dim is None:
+            return mlp_out
+
+        # if obs is an image, deconvolve the mlp output to reconstuct the image
+        shape = mlp_out.shape
+        # TODO aint those two lines redundant?
+        to_deconv = torch.unflatten(mlp_out, dim=-1, sizes=self.cnn_output_dim)
         to_deconv = to_deconv.view(-1, *self.cnn_output_dim)
         deconved = self.decnn(to_deconv)
         deconved = deconved.view(*shape[:-1], *deconved.shape[1:])
@@ -298,8 +235,11 @@ class Encoder(nn.Module):
     def forward(self, x):
         # x is of shape (..., c, h, w)
         c, h, w = x.shape[-3:]
+        # flatten the batch and time dimension as one
         encoded = self.net(x.view(-1, c, h, w))
 
+        # unflatten the batch and time dimension
+        # and flatten the output of the cnn
         return encoded.view(*x.shape[:-3], -1)
 
 
@@ -346,6 +286,98 @@ class PredModel(nn.Module):
     def forward(self, ht, zt):
         zt = torch.flatten(zt, start_dim=-2)  # flatten the last two dimensions
         return self.net(torch.cat([ht, zt], dim=-1))
+
+
+def weight_init(m: nn.Module):
+    # TODO why not use torch.init.normal_ ???
+    if isinstance(m, nn.Linear):
+        in_num = m.in_features
+        out_num = m.out_features
+        denoms = (in_num + out_num) / 2.0
+        scale = 1.0 / denoms
+        std = np.sqrt(scale) / 0.87962566103423978  # TODO why not torch.sqrt???
+        nn.init.trunc_normal_(m.weight.data, mean=0.0, std=std, a=-2.0 * std, b=2.0 * std)
+        if hasattr(m.bias, "data"):
+            m.bias.data.fill_(0.0)
+    elif isinstance(m, nn.LayerNorm):
+        m.weight.data.fill_(1.0)
+        if hasattr(m.bias, "data"):
+            m.bias.data.fill_(0.0)
+
+
+def uniform_init_weights(given_scale):  # TODO same here, why not torch.nn.init.uniform_?
+    def f(m):
+        if isinstance(m, nn.Linear):
+            in_num = m.in_features
+            out_num = m.out_features
+            denoms = (in_num + out_num) / 2.0
+            scale = given_scale / denoms
+            limit = np.sqrt(3 * scale)
+            nn.init.uniform_(m.weight.data, a=-limit, b=limit)
+            if hasattr(m.bias, "data"):
+                m.bias.data.fill_(0.0)
+        elif isinstance(m, nn.LayerNorm):
+            m.weight.data.fill_(1.0)
+            if hasattr(m.bias, "data"):
+                m.bias.data.fill_(0.0)
+
+    return f
+
+
+def make_mlp(
+    input_dim,
+    output_dim,
+    nb_layers=MLP_NB_HIDDEN_LAYERS,
+    hidden_dim=DENSE_HIDDEN_UNITS,
+):
+    """
+    output_zero_init: initializes the weights of the output layer to 0 bc:
+    "We further noticed that the randomly
+    initialized reward predictor and critic networks at the start of training can result in large predicted
+    rewards that can delay the onset of learning. We initialize the output weights of the reward predictor
+    and critic to zeros, which effectively alleviates the problem and accelerates early learning." page 7
+    """
+    layers = []
+    for i in range(nb_layers + 1):  # +1 for the input layer
+        layers.append(nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim))
+        layers.append(nn.LayerNorm(hidden_dim))
+        layers.append(nn.SiLU())
+    output_layer = nn.Linear(hidden_dim, output_dim)
+    layers.append(output_layer)
+    net = nn.Sequential(*layers)
+    net.apply(weight_init)
+
+    return net
+
+
+def make_cnn(
+    input_channels=4,
+    stages=CNN_STAGES,
+    multiplier=CNN_MULTIPLIER,
+    deconv=False,
+):
+    layers = []
+    channels = [input_channels]
+    channels += [i * 2 * multiplier for i in range(1, stages + 1)]
+    if deconv:
+        channels = channels[::-1]
+        layer = torch.nn.ConvTranspose2d
+    else:
+        layer = torch.nn.Conv2d
+
+    for i in range(len(channels) - 1):
+        layers.append(
+            layer(
+                in_channels=channels[i],
+                out_channels=channels[i + 1],
+                kernel_size=4,
+                stride=1,
+                padding=1,
+            )
+        )
+        layers.append(torch.nn.SiLU())
+
+    return torch.nn.Sequential(*layers)
 
 
 class LayerNormGRUCell(nn.Module):
