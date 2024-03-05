@@ -8,11 +8,9 @@ readme = "README.md"
 [tool.poetry.dependencies]
 python = ">=3.9, <4.0"
 pre-commit = "^3.6.0"
-tinygrad = {git = "https://github.com/tinygrad/tinygrad.git"}
 ipykernel = "^6.29.0"
 jupyter = "^1.0.0"
-torch = "^2.1.2"
-torchvision = "^0.16.2"
+torch = "2.2.1"
 wandb = "^0.16.2"
 einops = "^0.7.0"
 gymnasium = {extras = ["accept-rom-license", "atari"], version = "^0.29.1"}

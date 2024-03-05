@@ -1,14 +1,15 @@
 from typing import Callable
 
 import torch
-import torch.distributions as torchd
 from torch import Tensor
 
 from minidream.functional import symexp, symlog
 
 
-# https://github.com/NM512/dreamerv3-torch/blob/2c7a81a0e2f5f0c7659ba73b0ddbedf2a7e2ecf4/tools.py#L425
-class OneHotDist(torchd.one_hot_categorical.OneHotCategorical):
+# adapted from https://github.com/NM512/dreamerv3-torch/blob/2c7a81a0e2f5f0c7659ba73b0ddbedf2a7e2ecf4/tools.py#L425
+class OneHotCategoricalStraightThroughUnimix(
+    torch.distributions.one_hot_categorical.OneHotCategoricalStraightThrough
+):
     def __init__(self, logits=None, probs=None, unimix_ratio=0.01):
         if logits is not None and unimix_ratio > 0.0:
             probs = torch.softmax(logits, dim=-1)
@@ -17,22 +18,6 @@ class OneHotDist(torchd.one_hot_categorical.OneHotCategorical):
             super().__init__(logits=logits, probs=None)
         else:
             super().__init__(logits=logits, probs=probs)
-
-    def mode(self):
-        _mode = torch.nn.functional.one_hot(
-            torch.argmax(super().logits, axis=-1), super().logits.shape[-1]
-        )
-        return _mode.detach() + super().logits - super().logits.detach()
-
-    def sample(self, sample_shape=(), seed=None):
-        if seed is not None:
-            raise ValueError("need to check")
-        sample = super().sample(sample_shape)
-        probs = super().probs
-        while len(probs.shape) < len(sample.shape):
-            probs = probs[None]
-        sample += probs - probs.detach()
-        return sample
 
 
 # https://github.com/Eclectic-Sheep/sheeprl/blob/033ad744e6a87bed1203453867ecaab81026c616/sheeprl/utils/distribution.py#L224
@@ -59,10 +44,6 @@ class TwoHotEncodingDistribution:
 
     @property
     def mean(self) -> Tensor:
-        return self.transbwd((self.probs * self.bins).sum(dim=self.dims, keepdim=True))
-
-    @property
-    def mode(self) -> Tensor:
         return self.transbwd((self.probs * self.bins).sum(dim=self.dims, keepdim=True))
 
     def log_prob(self, x: Tensor) -> Tensor:

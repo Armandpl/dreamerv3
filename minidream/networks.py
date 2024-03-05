@@ -5,8 +5,10 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
-from minidream.dist import OneHotDist as OneHotCategoricalStraightThrough
-from minidream.dist import TwoHotEncodingDistribution
+from minidream.distributions import (
+    OneHotCategoricalStraightThroughUnimix,
+    TwoHotEncodingDistribution,
+)
 from minidream.ema import EMA
 from minidream.functional import symlog
 
@@ -15,7 +17,6 @@ DENSE_HIDDEN_UNITS = 512
 MLP_NB_HIDDEN_LAYERS = 2
 STOCHASTIC_STATE_SIZE = 32
 TWOHOTBUCKETS = 255
-
 
 CNN_MULTIPLIER = 32
 CNN_STAGES = 4
@@ -156,7 +157,7 @@ class RSSM(nn.Module):
 
         ht = self.recurrent_model(ht_minus_1, zt_minus_1, at_minus_1)  # (B, GRU_RECCURENT_UNITS)
         zt_dist, posterior_logits = self.representation_model(x, ht)
-        zt = zt_dist.sample()  # (B, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE)
+        zt = zt_dist.rsample()  # (B, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE)
 
         return ht, zt, posterior_logits
 
@@ -180,7 +181,7 @@ class RepresentationModel(nn.Module):  # TODO GRU w/ layer norm
     def forward(self, x, ht_minus_1):
         x = symlog(x)
         logits = self.net(torch.cat([x, ht_minus_1], dim=-1))
-        zt_dist = OneHotCategoricalStraightThrough(
+        zt_dist = OneHotCategoricalStraightThroughUnimix(
             logits=logits.view(*list(x.shape[:-1]), STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE)
         )
         return zt_dist, logits
@@ -249,7 +250,7 @@ class TransitionModel(nn.Module):
 
     def forward(self, x):
         logits = self.net(x)
-        zt_dist = OneHotCategoricalStraightThrough(
+        zt_dist = OneHotCategoricalStraightThroughUnimix(
             logits=logits.view(
                 *list(logits.shape[:-1]), STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE
             )
