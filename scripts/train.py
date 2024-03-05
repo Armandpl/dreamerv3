@@ -24,9 +24,9 @@ from minidream.networks import (
 )
 from minidream.replay_buffer import ReplayBuffer
 from minidream.utils import count_parameters
-from minidream.wrappers import PreProcessMinatar
+from minidream.wrappers import PreProcessAtari, PreProcessMinatar
 
-DEBUG = False  # wether or not to use wandb
+DEBUG = True  # wether or not to use wandb
 
 # Tuning the HPs = losing
 # Actor Critic
@@ -244,8 +244,8 @@ def train_actor_critic(
     # at least that's what I understand rn
     continues = Independent(
         BernoulliSafeMode(logits=world_model.continue_model(hts, zts)), 1
-    ).mode  # TODO can we just do > 0.5?
-    # make sur we don't use imagined trajectories from terminal states
+    ).mode  # Do we need to use independant here? TODO
+    # make sur we don't use imagine trajectories from terminal states
     # so get the real termination flags for step=0
     true_done = data["done"].view(-1, 1)
     continues[:, 0] = 1.0 - true_done[:, :1]
@@ -379,7 +379,9 @@ def main(cfg: DictConfig):
         run = wandb.init(project="minidream_dev", job_type="train")
 
     # setup env
-    env = gymnasium.make("CartPole-v1")
+    # env = gymnasium.make("CartPole-v1")
+    env = gymnasium.make("ALE/Breakout-v5")
+    env = PreProcessAtari(env)
     # env = gymnasium.make("MinAtar/Breakout-v1")
     # env = PreProcessMinatar(env)
     replay_buffer = ReplayBuffer(min(REPLAY_CAPACITY, cfg.max_steps), env.observation_space)

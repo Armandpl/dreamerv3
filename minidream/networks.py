@@ -16,6 +16,7 @@ GRU_RECCURENT_UNITS = 512
 DENSE_HIDDEN_UNITS = 512
 MLP_NB_HIDDEN_LAYERS = 2
 STOCHASTIC_STATE_SIZE = 32
+
 TWOHOTBUCKETS = 255
 
 CNN_MULTIPLIER = 32
@@ -42,26 +43,19 @@ class RSSM(nn.Module):
         if img_obs:
             self.encoder = Encoder(observation_space)
             c, h, w = observation_space.shape
-            cnn_output_dim = self.encoder(torch.zeros(1, c, h, w)).shape[1:]
+            cnn_output_dim = self.encoder.net(torch.zeros(1, c, h, w)).shape[1:]
         else:
             self.encoder = nn.Identity()
+            cnn_output_dim = None
 
         self.representation_model = RepresentationModel(
-            # observation_space=observation_space,
-            input_dim=np.prod(cnn_output_dim)
-            if img_obs
-            else observation_space.shape[0],
+            input_dim=np.prod(cnn_output_dim) if img_obs else observation_space.shape[0],
         )
         self.recurrent_model = RecurrentModel(
             action_space=action_space,
         )
         self.transition_model = TransitionModel()
-        self.decoder = Decoder(
-            observation_space=observation_space,
-            cnn_output_dim=(256, 6, 6)
-            if img_obs
-            else None,  # TODO get the outputs from the encoder
-        )
+        self.decoder = Decoder(observation_space=observation_space, cnn_output_dim=cnn_output_dim)
         self.reward_model = PredModel(TWOHOTBUCKETS, output_init=uniform_init_weights(0.0))
         self.continue_model = PredModel(1, output_init=uniform_init_weights(1.0))
         self.return_ema = EMA()
@@ -371,7 +365,7 @@ def make_cnn(
                 in_channels=channels[i],
                 out_channels=channels[i + 1],
                 kernel_size=4,
-                stride=1,
+                stride=2,
                 padding=1,
             )
         )

@@ -21,6 +21,7 @@ torchrl = "^0.3.0"
 matplotlib = "^3.8.2"
 pytest = "^8.0.1"
 minatar = "^1.0.15"
+torchvision = "^0.17.1"
 
 
 [build-system]
