@@ -389,8 +389,8 @@ def main(cfg: DictConfig):
     # setup env
     env = gym.make(cfg.env.env_id, **cfg.env.get("kwargs", {}))
 
-    if "wrappers" in cfg:
-        for wrapper in cfg.wrappers:
+    if "wrappers" in cfg.env:
+        for wrapper in cfg.env.wrappers:
             env = hydra.utils.instantiate(wrapper, env=env)
 
     replay_buffer = ReplayBuffer(min(REPLAY_CAPACITY, cfg.max_steps), env.observation_space)
