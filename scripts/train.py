@@ -1,9 +1,9 @@
 import copy
 
-import gymnasium
+import gymnasium as gym
 import hydra
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from torch.distributions import Independent
 from torch.distributions.kl import kl_divergence
 from tqdm import trange
@@ -24,9 +24,6 @@ from minidream.networks import (
 )
 from minidream.replay_buffer import ReplayBuffer
 from minidream.utils import count_parameters
-from minidream.wrappers import PreProcessAtari, PreProcessMinatar
-
-DEBUG = True  # wether or not to use wandb
 
 # Tuning the HPs = losing
 # Actor Critic
@@ -59,8 +56,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # TODO use sg in the same place it was used in the paper equations
 # else use torch.no_grad()
-# TODO double check to make sure we don't detached not attached tensors
-# are already detached ones
+# TODO double check to make sure we don't detache not attached tensors
 # to save chars, for readability
 # put it at the top of the code so ppl that haven't read the the paper don't get confused
 def sg(x):
@@ -137,7 +133,14 @@ def train_step_world_model(
     distance = torch.where(
         distance < MIN_SYMLOG_DISTANCE, 0, distance
     )  # got that from the offical implem
-    recon_loss = distance.sum(dim=[-1, -2, -3])  # TODO -1 for vector obs, -3 for image obs
+
+    # sum over all dims except the batch and time dim
+    sum_dims = [-i for i in range(1, len(reconstructed_obs.shape[2:]) + 1)]
+    # TODO should we average instead?
+    # for images the recon loss is way bigger than the other losses
+    # is that a problem
+    recon_loss = distance.sum(dim=sum_dims)
+    # recon_loss = distance.mean(dim=sum_dims)
 
     pred_rewards_distrib = TwoHotEncodingDistribution(pred_rewards_logits, dims=1)
     rew_loss = -pred_rewards_distrib.log_prob(data["reward"])  # sum over the last dim
@@ -146,6 +149,8 @@ def train_step_world_model(
         BernoulliSafeMode(logits=pred_continues),
         1,
     ).log_prob(1.0 - data["done"])
+
+    # TODO assert the shapes are the same so that we don't broadcast erroneously
     loss_pred = (recon_loss + rew_loss + continue_loss).mean()  # average accross batch and time
 
     # kl loss
@@ -367,7 +372,6 @@ def collect_rollout(env, replay_buffer, actor: Actor = None, rssm: RSSM = None):
             done = terminated or truncated
 
             if replay_buffer is not None:
-                # replay_buffer.add(act, obs, reward, terminated, first)
                 replay_buffer.add(act, obs, reward, done, first)
             first = False
     return episode_return
@@ -375,18 +379,23 @@ def collect_rollout(env, replay_buffer, actor: Actor = None, rssm: RSSM = None):
 
 @hydra.main(version_base="1.3", config_path="configs", config_name="train.yaml")
 def main(cfg: DictConfig):
-    if not DEBUG:
-        run = wandb.init(project="minidream_dev", job_type="train")
+    if cfg.use_wandb:
+        run = wandb.init(
+            project=cfg.wandb_project,
+            job_type="train",
+            config=OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True),
+        )
 
     # setup env
-    # env = gymnasium.make("CartPole-v1")
-    env = gymnasium.make("ALE/Breakout-v5")
-    env = PreProcessAtari(env)
-    # env = gymnasium.make("MinAtar/Breakout-v1")
-    # env = PreProcessMinatar(env)
+    env = gym.make(cfg.env.env_id, **cfg.env.get("kwargs", {}))
+
+    if "wrappers" in cfg:
+        for wrapper in cfg.wrappers:
+            env = hydra.utils.instantiate(wrapper, env=env)
+
     replay_buffer = ReplayBuffer(min(REPLAY_CAPACITY, cfg.max_steps), env.observation_space)
 
-    # setup models and opts
+    # setup models and optimizers
     world_model = RSSM(
         observation_space=env.observation_space,
         action_space=env.action_space,
@@ -414,7 +423,7 @@ def main(cfg: DictConfig):
     for global_step in trange(cfg.max_steps):
 
         if done:
-            if not DEBUG:
+            if cfg.use_wandb:
                 run.log(
                     {
                         "episode_return": episode_return,
@@ -473,10 +482,10 @@ def main(cfg: DictConfig):
             )
 
             loss_dict = {**wm_loss_dict, **actor_critic_loss_dict}
-            if not DEBUG:
+            if cfg.use_wandb:
                 run.log({**loss_dict, "global_step": global_step})
 
-    if not DEBUG:
+    if cfg.use_wandb:
         run.finish()
 
     # save models

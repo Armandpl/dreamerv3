@@ -1,5 +1,10 @@
-max_steps: 1_000_000
-train_ratio: 64
-learning_starts: 50000
-# save_model: False
-# wandb_project: "minidream_dev"
+defaults:
+  - _self_
+  - env: ???
+
+max_steps: 100_000
+train_ratio: 1024
+learning_starts: 1024
+save_model: False
+use_wandb: True
+wandb_project: "minidream_dev"
