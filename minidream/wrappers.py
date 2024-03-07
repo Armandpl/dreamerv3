@@ -68,6 +68,7 @@ class PreProcessAtari(gym.Wrapper):
         obs = obs.transpose(2, 0, 1)
         obs = convert_image_dtype(torch.tensor(obs), torch.float)
         obs = resize(obs, (64, 64))
-        obs = normalize(obs, mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        obs = (obs * 2) - 1
+        # obs = normalize(obs, mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
 
         return obs, reward, terminated, truncated, info
