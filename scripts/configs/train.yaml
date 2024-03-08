@@ -2,9 +2,10 @@ defaults:
   - _self_
   - env: ???
 
-max_steps: 100_000
+max_steps: 1025
 train_ratio: 1024
 learning_starts: 1024
-save_model: False
+save_model: True
 use_wandb: True
 wandb_project: "minidream_dev"
+record_video: True

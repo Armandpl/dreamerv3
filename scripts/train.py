@@ -3,6 +3,7 @@ import copy
 import gymnasium as gym
 import hydra
 import torch
+from gymnasium.wrappers import RecordVideo
 from omegaconf import DictConfig, OmegaConf
 from torch.distributions import Independent
 from torch.distributions.kl import kl_divergence
@@ -23,7 +24,7 @@ from minidream.networks import (
     Critic,
 )
 from minidream.replay_buffer import ReplayBuffer
-from minidream.utils import count_parameters
+from minidream.utils import count_parameters, save_model_to_artifacts
 
 # Tuning the HPs = losing
 # Actor Critic
@@ -387,7 +388,9 @@ def main(cfg: DictConfig):
         )
 
     # setup env
-    env = gym.make(cfg.env.env_id, **cfg.env.get("kwargs", {}))
+    kwargs = cfg.env.get("kwargs", {})
+    kwargs = {**kwargs, "render_mode": "rgb_array" if cfg.record_video else None}
+    env = gym.make(cfg.env.env_id, **kwargs)
 
     if "wrappers" in cfg.env:
         for wrapper in cfg.env.wrappers:
@@ -485,15 +488,23 @@ def main(cfg: DictConfig):
             if cfg.use_wandb:
                 run.log({**loss_dict, "global_step": global_step})
 
-    if cfg.use_wandb:
-        run.finish()
-
     # save models
     torch.save(world_model.state_dict(), "../data/world_model.pth")
     torch.save(actor.state_dict(), "../data/actor.pth")
-    # TODO write inference script
 
-    # TODO record and log a video of the agent
+    if cfg.save_model and cfg.use_wandb:
+        save_model_to_artifacts(world_model, actor, critic, name="model")
+
+    if cfg.use_wandb and cfg.record_video:
+        env = RecordVideo(
+            env, video_folder="../data", video_length=1000, step_trigger=lambda _: True
+        )
+        collect_rollout(env, None, actor, world_model)
+        wandb.log({"video": wandb.Video("../data/rl-video-step-0.mp4")})
+        env.close()
+
+    if cfg.use_wandb:
+        run.finish()
 
 
 if __name__ == "__main__":

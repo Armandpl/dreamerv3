@@ -22,6 +22,7 @@ matplotlib = "^3.8.2"
 pytest = "^8.0.1"
 minatar = "^1.0.15"
 opencv-python = "^4.9.0.80"
+moviepy = "^1.0.3"
 
 
 [build-system]
