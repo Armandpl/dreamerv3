@@ -50,6 +50,7 @@ class RSSM(nn.Module):
 
         self.representation_model = RepresentationModel(
             input_dim=np.prod(cnn_output_dim) if img_obs else observation_space.shape[0],
+            symlog=(not img_obs),
         )
         self.recurrent_model = RecurrentModel(
             action_space=action_space,
@@ -89,8 +90,10 @@ class RepresentationModel(nn.Module):  # TODO GRU w/ layer norm
         self,
         # observation_space: gymnasium.spaces.Box,
         input_dim: int,
+        symlog: bool = True,
     ):
         super().__init__()
+        self.symlog = symlog
 
         self.net = make_mlp(
             input_dim=input_dim + GRU_RECCURENT_UNITS,
@@ -99,7 +102,8 @@ class RepresentationModel(nn.Module):  # TODO GRU w/ layer norm
         self.net[-1].apply(uniform_init_weights(1.0))
 
     def forward(self, x, ht_minus_1):
-        x = symlog(x)
+        if self.symlog:  # if not an encoded image obs
+            x = symlog(x)
         logits = self.net(torch.cat([x, ht_minus_1], dim=-1))
         zt_dist = OneHotCategoricalStraightThroughUnimix(
             logits=logits.view(*list(x.shape[:-1]), STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE)
