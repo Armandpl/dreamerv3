@@ -1,4 +1,5 @@
 import copy
+from pathlib import Path
 
 import gymnasium as gym
 import hydra
@@ -139,7 +140,7 @@ def train_step_world_model(
     sum_dims = [-i for i in range(1, len(reconstructed_obs.shape[2:]) + 1)]
     # TODO should we average instead?
     # for images the recon loss is way bigger than the other losses
-    # is that a problem
+    # is that a problem, is it dwarfing the other losses???
     recon_loss = distance.sum(dim=sum_dims)
     # recon_loss = distance.mean(dim=sum_dims)
 
@@ -496,12 +497,13 @@ def main(cfg: DictConfig):
         save_model_to_artifacts(world_model, actor, critic, name="model")
 
     if cfg.use_wandb and cfg.record_video:
+        video_folder = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
         env = RecordVideo(
-            env, video_folder="../data", video_length=1000, step_trigger=lambda _: True
+            env, video_folder=video_folder, video_length=1000, step_trigger=lambda _: True
         )
         collect_rollout(env, None, actor, world_model)
-        wandb.log({"video": wandb.Video("../data/rl-video-step-0.mp4")})
         env.close()
+        wandb.log({"video": wandb.Video(str(Path(video_folder) / "rl-video-step-0.mp4"))})
 
     if cfg.use_wandb:
         run.finish()
