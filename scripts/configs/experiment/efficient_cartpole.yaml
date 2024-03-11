@@ -1,0 +1,7 @@
+# @package _global_
+defaults:
+  - override /env: cartpole
+
+max_steps: 60_000
+train_ratio: 512
+learning_starts: 10_000
