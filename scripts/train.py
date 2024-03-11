@@ -345,7 +345,7 @@ def main(cfg: DictConfig):
         )
 
     # instantiate env and wrappers
-    env = setup_env(cfg.env, record_video=cfg.record_video)
+    env = setup_env(cfg.env, render_mode="rgb_array" if cfg.record_video else None)
 
     replay_buffer = ReplayBuffer(min(REPLAY_CAPACITY, cfg.max_steps), env.observation_space)
 
