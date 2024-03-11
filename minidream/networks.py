@@ -125,11 +125,7 @@ class RecurrentModel(nn.Module):
             input_dim=STOCHASTIC_STATE_SIZE**2 + self.action_space.n,
             output_dim=GRU_RECCURENT_UNITS,
         )
-        # self.GRU = nn.GRU(
-        #     input_size=GRU_RECCURENT_UNITS,
-        #     hidden_size=GRU_RECCURENT_UNITS,
-        #     batch_first=True,
-        # )
+
         self.GRU = LayerNormGRUCell(
             input_size=GRU_RECCURENT_UNITS,
             hidden_size=GRU_RECCURENT_UNITS,
@@ -141,9 +137,11 @@ class RecurrentModel(nn.Module):
         # one hot encode the action
         # TODO remove the casting to long and actually pass a long tensor
         # TODO add tensor type to typing?
-        a = torch.nn.functional.one_hot(
-            a.squeeze(-1).to(torch.long), num_classes=self.action_space.n
-        ).float()
+        if isinstance(self.action_space, gymnasium.spaces.Discrete):
+            a = torch.nn.functional.one_hot(
+                a.squeeze(-1).to(torch.long), num_classes=self.action_space.n
+            ).float()
+
         mlp_out = self.mlp(
             torch.cat([torch.flatten(zt_minus_1, start_dim=-2), a], dim=-1)
         )  # (batch_size, 128)
