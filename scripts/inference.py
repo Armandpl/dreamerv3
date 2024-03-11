@@ -1,28 +1,34 @@
+import sys
 import time
 
-import gymnasium as gym
 import torch
-from train import collect_rollout
+from omegaconf import DictConfig
 
-from minidream.networks import RSSM, Actor
-from minidream.wrappers import PreProcessMinatar
+import wandb
+from dreamer.networks import RSSM, Actor, run_rollout
+from dreamer.utils import load_model_from_artifact, setup_env
 
 
-def main():
+def main(artifact_alias: str):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # env = gym.make("CartPole-v1", render_mode="human")
-    env = gym.make("MinAtar/Breakout-v1", render_mode="human")
-    env = PreProcessMinatar(env)
-    world_model = RSSM(env.observation_space, env.action_space).to(device)
-    world_model.load_state_dict(torch.load("../data/world_model.pth", map_location=device))
-    actor = Actor(env.action_space).to(device)
-    actor.load_state_dict(torch.load("../data/actor.pth", map_location=device))
+    run = wandb.init(project="minidream_dev", job_type="inference")
+    creator_run = run.use_artifact(artifact_alias).logged_by()
 
-    for _ in range(50):
-        ep_return = collect_rollout(env, None, actor, world_model)
+    env = setup_env(DictConfig(creator_run.config).env, render_mode="human")
+
+    world_model = RSSM(env.observation_space, env.action_space).to(device)
+    actor = Actor(env.action_space).to(device)
+
+    load_model_from_artifact(artifact_alias, world_model, actor, device=device)
+
+    run.finish()
+
+    for _ in range(25):
+        ep_return = run_rollout(env, actor, world_model)
         print(f"episode return: {ep_return}")
         time.sleep(1)
 
 
 if __name__ == "__main__":
-    main()
+    assert len(sys.argv) > 1, "Please provide the model artifact alias"
+    main(sys.argv[1])

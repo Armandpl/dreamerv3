@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 import gymnasium as gym
 import hydra
@@ -9,7 +9,7 @@ from omegaconf import DictConfig
 import wandb
 
 
-def setup_env(env_cfg: DictConfig, record_video: bool = False):
+def setup_env(env_cfg: DictConfig, render_mode: str = None):
     """Set up the environment and wrappers for training/inference.
 
     Args:
@@ -24,7 +24,7 @@ def setup_env(env_cfg: DictConfig, record_video: bool = False):
         gym.Env: The configured gym environment.
     """
     kwargs = env_cfg.get("kwargs", {})
-    kwargs = {**kwargs, "render_mode": "rgb_array" if record_video else None}
+    kwargs = {**kwargs, "render_mode": render_mode}
     env = gym.make(env_cfg.env_id, **kwargs)
 
     if "wrappers" in env_cfg:
@@ -69,7 +69,13 @@ def save_model_to_artifacts(
     wandb.log_artifact(artifact)
 
 
-def load_model_from_artifact(artifact_alias: str, world_model, actor, critic):
+def load_model_from_artifact(
+    artifact_alias: str,
+    world_model: torch.nn.Module,
+    actor: torch.nn.Module,
+    critic: Optional[torch.nn.Module] = None,
+    device: str = "cpu",
+):
     """Download the specified artifact file and return the path to the file.
 
     Args:
@@ -78,6 +84,13 @@ def load_model_from_artifact(artifact_alias: str, world_model, actor, critic):
     """
     artifact = wandb.use_artifact(artifact_alias)
     artifact_dir = Path(artifact.download())
-    world_model.load_state_dict(torch.load(artifact_dir / "world_model.pth"))
-    actor.load_state_dict(torch.load(artifact_dir / "actor.pth"))
-    critic.load_state_dict(torch.load(artifact_dir / "critic.pth"))
+    world_model.load_state_dict(
+        torch.load(artifact_dir / "world_model.pth", map_location=torch.device(device))
+    )
+    actor.load_state_dict(
+        torch.load(artifact_dir / "actor.pth", map_location=torch.device(device))
+    )
+    if critic:
+        critic.load_state_dict(
+            torch.load(artifact_dir / "critic.pth", map_location=torch.device(device))
+        )
