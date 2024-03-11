@@ -10,13 +10,13 @@ from torch.distributions.kl import kl_divergence
 from tqdm import trange
 
 import wandb
-from minidream.distributions import (
+from dreamer.distributions import (
     BernoulliSafeMode,
     OneHotCategoricalStraightThroughUnimix,
     TwoHotEncodingDistribution,
 )
-from minidream.functional import compute_lambda_returns, symlog
-from minidream.networks import (
+from dreamer.functional import compute_lambda_returns, symlog
+from dreamer.networks import (
     GRU_RECCURENT_UNITS,
     RSSM,
     STOCHASTIC_STATE_SIZE,
@@ -24,8 +24,8 @@ from minidream.networks import (
     Critic,
     run_rollout,
 )
-from minidream.replay_buffer import ReplayBuffer
-from minidream.utils import count_parameters, save_model_to_artifacts, setup_env
+from dreamer.replay_buffer import ReplayBuffer
+from dreamer.utils import count_parameters, save_model_to_artifacts, setup_env
 
 # Tuning the HPs = losing
 # Actor Critic
