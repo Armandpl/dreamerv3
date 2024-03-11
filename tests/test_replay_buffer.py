@@ -1,7 +1,7 @@
 import gymnasium as gym
 import numpy as np
 
-from minidream.replay_buffer import ReplayBuffer
+from dreamer.replay_buffer import ReplayBuffer
 
 max_size = 100
 obs_space = gym.spaces.Box(low=0, high=1, shape=(4,))
