@@ -7,8 +7,8 @@ import torch
 from furuta.rl.envs.furuta_base import FurutaBase
 from furuta.utils import VelocityFilter
 
-from minidream.functional import symexp
-from minidream.networks import GRU_RECCURENT_UNITS, RSSM, STOCHASTIC_STATE_SIZE
+from dreamer.functional import symexp
+from dreamer.networks import GRU_RECCURENT_UNITS, RSSM, STOCHASTIC_STATE_SIZE
 
 
 class FurutaNeuralSim(FurutaBase):

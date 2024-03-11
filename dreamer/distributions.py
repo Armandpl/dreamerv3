@@ -3,7 +3,7 @@ from typing import Callable
 import torch
 from torch import Tensor
 
-from minidream.functional import symexp, symlog
+from dreamer.functional import symexp, symlog
 
 
 # adapted from https://github.com/NM512/dreamerv3-torch/blob/2c7a81a0e2f5f0c7659ba73b0ddbedf2a7e2ecf4/tools.py#L425

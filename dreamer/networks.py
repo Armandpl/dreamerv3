@@ -5,12 +5,12 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
-from minidream.distributions import (
+from dreamer.distributions import (
     OneHotCategoricalStraightThroughUnimix,
     TwoHotEncodingDistribution,
 )
-from minidream.ema import EMA
-from minidream.functional import symlog
+from dreamer.ema import EMA
+from dreamer.functional import symlog
 
 GRU_RECCURENT_UNITS = 512
 DENSE_HIDDEN_UNITS = 512
