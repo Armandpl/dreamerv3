@@ -1,0 +1,9 @@
+defaults:
+  - _self_
+  - wrappers: atari
+
+env_id: ???
+env_kwargs:
+  frameskip: 4
+  repeat_action_probability: 0.25
+  full_action_space: False

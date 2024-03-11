@@ -1,6 +1,6 @@
 import torch
 
-from minidream.functional import compute_lambda_returns
+from dreamer.functional import compute_lambda_returns
 
 
 def test_compute_lambda_values():

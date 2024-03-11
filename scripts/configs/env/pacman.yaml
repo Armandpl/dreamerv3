@@ -1,0 +1,6 @@
+defaults:
+  - atari
+
+env_id: "ALE/MsPacman-v5"
+env_kwargs:
+  difficulty: 0

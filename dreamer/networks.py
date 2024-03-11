@@ -5,12 +5,12 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
-from minidream.distributions import (
+from dreamer.distributions import (
     OneHotCategoricalStraightThroughUnimix,
     TwoHotEncodingDistribution,
 )
-from minidream.ema import EMA
-from minidream.functional import symlog
+from dreamer.ema import EMA
+from dreamer.functional import symlog
 
 GRU_RECCURENT_UNITS = 512
 DENSE_HIDDEN_UNITS = 512
@@ -50,6 +50,7 @@ class RSSM(nn.Module):
 
         self.representation_model = RepresentationModel(
             input_dim=np.prod(cnn_output_dim) if img_obs else observation_space.shape[0],
+            symlog=(not img_obs),
         )
         self.recurrent_model = RecurrentModel(
             action_space=action_space,
@@ -89,8 +90,10 @@ class RepresentationModel(nn.Module):  # TODO GRU w/ layer norm
         self,
         # observation_space: gymnasium.spaces.Box,
         input_dim: int,
+        symlog: bool = True,
     ):
         super().__init__()
+        self.symlog = symlog
 
         self.net = make_mlp(
             input_dim=input_dim + GRU_RECCURENT_UNITS,
@@ -99,7 +102,8 @@ class RepresentationModel(nn.Module):  # TODO GRU w/ layer norm
         self.net[-1].apply(uniform_init_weights(1.0))
 
     def forward(self, x, ht_minus_1):
-        x = symlog(x)
+        if self.symlog:  # if not an encoded image obs
+            x = symlog(x)
         logits = self.net(torch.cat([x, ht_minus_1], dim=-1))
         zt_dist = OneHotCategoricalStraightThroughUnimix(
             logits=logits.view(*list(x.shape[:-1]), STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE)
@@ -121,11 +125,7 @@ class RecurrentModel(nn.Module):
             input_dim=STOCHASTIC_STATE_SIZE**2 + self.action_space.n,
             output_dim=GRU_RECCURENT_UNITS,
         )
-        # self.GRU = nn.GRU(
-        #     input_size=GRU_RECCURENT_UNITS,
-        #     hidden_size=GRU_RECCURENT_UNITS,
-        #     batch_first=True,
-        # )
+
         self.GRU = LayerNormGRUCell(
             input_size=GRU_RECCURENT_UNITS,
             hidden_size=GRU_RECCURENT_UNITS,
@@ -137,9 +137,11 @@ class RecurrentModel(nn.Module):
         # one hot encode the action
         # TODO remove the casting to long and actually pass a long tensor
         # TODO add tensor type to typing?
-        a = torch.nn.functional.one_hot(
-            a.squeeze(-1).to(torch.long), num_classes=self.action_space.n
-        ).float()
+        if isinstance(self.action_space, gymnasium.spaces.Discrete):
+            a = torch.nn.functional.one_hot(
+                a.squeeze(-1).to(torch.long), num_classes=self.action_space.n
+            ).float()
+
         mlp_out = self.mlp(
             torch.cat([torch.flatten(zt_minus_1, start_dim=-2), a], dim=-1)
         )  # (batch_size, 128)
@@ -280,6 +282,38 @@ class PredModel(nn.Module):
     def forward(self, ht, zt):
         zt = torch.flatten(zt, start_dim=-2)  # flatten the last two dimensions
         return self.net(torch.cat([ht, zt], dim=-1))
+
+
+def run_rollout(env, actor: Actor, rssm: RSSM, device: str = "cpu"):
+    with torch.no_grad():
+        obs, _ = env.reset()
+        ht_minus_1 = torch.zeros(1, GRU_RECCURENT_UNITS, device=device)
+        zt_minus_1 = torch.zeros(1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device)
+        # zt_dist, _ = rssm.representation_model(
+        #     torch.tensor(obs).unsqueeze(0).to(device), ht_minus_1
+        # )
+        # zt_minus_1 = zt_dist.sample()
+
+        done = False
+        episode_return = 0
+
+        while not done:
+            act_dist = actor(ht_minus_1, zt_minus_1)
+            act = act_dist.sample()
+            act = act.unsqueeze(0)
+            ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
+            act = act.cpu()
+
+            obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
+            episode_return += reward
+
+            encoded_obs = rssm.encoder(torch.tensor(obs).unsqueeze(0).to(device))
+            zt_dist, _ = rssm.representation_model(encoded_obs, ht_minus_1)
+            zt_minus_1 = zt_dist.sample()
+
+            done = terminated or truncated
+
+    return episode_return
 
 
 def weight_init(m: nn.Module):

@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "minidream"
+name = "dreamer"
 version = "0.1.0"
 description = ""
 authors = ["Your Name <you@example.com>"]
@@ -21,7 +21,8 @@ torchrl = "^0.3.0"
 matplotlib = "^3.8.2"
 pytest = "^8.0.1"
 minatar = "^1.0.15"
-torchvision = "^0.17.1"
+opencv-python = "^4.9.0.80"
+moviepy = "^1.0.3"
 
 
 [build-system]
