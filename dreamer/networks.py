@@ -181,7 +181,8 @@ class TransitionModel(nn.Module):
 
 
 class Decoder(nn.Module):
-    """Reconstructs observations from the latent state (ht + zt)"""
+    """Reconstructs observations from the latent state (ht + zt) If cnn_output_dim is not None, the
+    reconstructed observation is an image."""
 
     def __init__(
         self,
@@ -193,11 +194,18 @@ class Decoder(nn.Module):
         if cnn_output_dim is not None:
             self.decnn = make_cnn(deconv=True, input_channels=observation_space.shape[0])
 
+        # TODO
+        if observation_space.shape[1] == 10:
+            stride = 1
+        else:
+            stride = 2
+
         self.mlp = make_mlp(
             input_dim=STOCHASTIC_STATE_SIZE**2 + GRU_RECCURENT_UNITS,
             output_dim=np.prod(cnn_output_dim)
             if cnn_output_dim is not None
             else observation_space.shape[0],
+            stride=stride,
         )
 
     def forward(self, ht, zt):
@@ -226,7 +234,12 @@ class Encoder(nn.Module):
         observation_space: gymnasium.spaces.Box,
     ):
         super().__init__()
-        self.net = make_cnn(input_channels=observation_space.shape[0])
+        # TODO ugly hardcode to have a stride of 1 for minatar
+        if observation_space.shape[1] == 10:
+            stride = 1
+        else:
+            stride = 2
+        self.net = make_cnn(input_channels=observation_space.shape[0], stride=stride)
 
     def forward(self, x):
         # x is of shape (..., c, h, w)
@@ -382,6 +395,9 @@ def make_cnn(
     input_channels=4,
     stages=CNN_STAGES,
     multiplier=CNN_MULTIPLIER,
+    kernel_size=4,
+    stride=2,
+    padding=1,
     deconv=False,
 ):
     layers = []
@@ -398,9 +414,9 @@ def make_cnn(
             layer(
                 in_channels=channels[i],
                 out_channels=channels[i + 1],
-                kernel_size=4,
-                stride=2,
-                padding=1,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
             )
         )
         layers.append(torch.nn.SiLU())
