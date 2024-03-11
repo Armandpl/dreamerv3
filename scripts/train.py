@@ -23,6 +23,7 @@ from minidream.networks import (
     STOCHASTIC_STATE_SIZE,
     Actor,
     Critic,
+    run_rollout,
 )
 from minidream.replay_buffer import ReplayBuffer
 from minidream.utils import count_parameters, save_model_to_artifacts
@@ -335,50 +336,6 @@ def train_actor_critic(
     }
 
 
-def collect_rollout(env, replay_buffer, actor: Actor = None, rssm: RSSM = None):
-    use_actor = actor is not None and rssm is not None
-    with torch.no_grad():
-        obs, _ = env.reset()
-        if use_actor:
-            ht_minus_1 = torch.zeros(1, GRU_RECCURENT_UNITS, device=device)
-            zt_minus_1 = torch.zeros(
-                1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device
-            )
-            # zt_dist, _ = rssm.representation_model(
-            #     torch.tensor(obs).unsqueeze(0).to(device), ht_minus_1
-            # )
-            # zt_minus_1 = zt_dist.sample()
-
-        done = False
-        first = True
-        episode_return = 0
-
-        while not done:
-            if use_actor:
-                act_dist = actor(ht_minus_1, zt_minus_1)
-                act = act_dist.sample()
-                act = act.unsqueeze(0)
-                ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
-                act = act.cpu()
-            else:
-                act = env.action_space.sample()
-
-            obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
-            episode_return += reward
-
-            if use_actor:
-                encoded_obs = rssm.encoder(torch.tensor(obs).unsqueeze(0).to(device))
-                zt_dist, _ = rssm.representation_model(encoded_obs, ht_minus_1)
-                zt_minus_1 = zt_dist.sample()
-
-            done = terminated or truncated
-
-            if replay_buffer is not None:
-                replay_buffer.add(act, obs, reward, done, first)
-            first = False
-    return episode_return
-
-
 @hydra.main(version_base="1.3", config_path="configs", config_name="train.yaml")
 def main(cfg: DictConfig):
     if cfg.use_wandb:
@@ -489,21 +446,16 @@ def main(cfg: DictConfig):
             if cfg.use_wandb:
                 run.log({**loss_dict, "global_step": global_step})
 
-    # save models
-    torch.save(world_model.state_dict(), "../data/world_model.pth")
-    torch.save(actor.state_dict(), "../data/actor.pth")
-
     if cfg.save_model and cfg.use_wandb:
-        save_model_to_artifacts(world_model, actor, critic, name="model")
+        save_model_to_artifacts(run.dir, world_model, actor, critic, name="model")
 
     if cfg.use_wandb and cfg.record_video:
-        video_folder = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
         env = RecordVideo(
-            env, video_folder=video_folder, video_length=1000, step_trigger=lambda _: True
+            env, video_folder=run.dir, video_length=1000, step_trigger=lambda _: True
         )
-        collect_rollout(env, None, actor, world_model)
+        run_rollout(env, None, actor, world_model, device=device)
         env.close()
-        wandb.log({"video": wandb.Video(str(Path(video_folder) / "rl-video-step-0.mp4"))})
+        wandb.log({"video": wandb.Video(str(Path(run.dir) / "rl-video-step-0.mp4"))})
 
     if cfg.use_wandb:
         run.finish()

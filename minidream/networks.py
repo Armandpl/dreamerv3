@@ -284,6 +284,38 @@ class PredModel(nn.Module):
         return self.net(torch.cat([ht, zt], dim=-1))
 
 
+def run_rollout(env, actor: Actor, rssm: RSSM, device: str = "cpu"):
+    with torch.no_grad():
+        obs, _ = env.reset()
+        ht_minus_1 = torch.zeros(1, GRU_RECCURENT_UNITS, device=device)
+        zt_minus_1 = torch.zeros(1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device)
+        # zt_dist, _ = rssm.representation_model(
+        #     torch.tensor(obs).unsqueeze(0).to(device), ht_minus_1
+        # )
+        # zt_minus_1 = zt_dist.sample()
+
+        done = False
+        episode_return = 0
+
+        while not done:
+            act_dist = actor(ht_minus_1, zt_minus_1)
+            act = act_dist.sample()
+            act = act.unsqueeze(0)
+            ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
+            act = act.cpu()
+
+            obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
+            episode_return += reward
+
+            encoded_obs = rssm.encoder(torch.tensor(obs).unsqueeze(0).to(device))
+            zt_dist, _ = rssm.representation_model(encoded_obs, ht_minus_1)
+            zt_minus_1 = zt_dist.sample()
+
+            done = terminated or truncated
+
+    return episode_return
+
+
 def weight_init(m: nn.Module):
     # TODO why not use torch.init.normal_ ???
     if isinstance(m, nn.Linear):
