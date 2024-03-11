@@ -1,9 +1,37 @@
 from pathlib import Path
 from typing import Union
 
+import gymnasium as gym
+import hydra
 import torch
+from omegaconf import DictConfig
 
 import wandb
+
+
+def setup_env(env_cfg: DictConfig, record_video: bool = False):
+    """Set up the environment and wrappers for training/inference.
+
+    Args:
+        env_cfg (DictConfig): Configuration for the environment. It should contain the following keys:
+            - env_id (str): The ID of the gym environment to create.
+            - kwargs (dict, optional): Additional keyword arguments to pass to the gym environment.
+            - wrappers (list, optional): List of wrapper classes to apply to the environment.
+
+        record_video (bool, optional): Whether to record video of the environment. Defaults to False.
+
+    Returns:
+        gym.Env: The configured gym environment.
+    """
+    kwargs = env_cfg.get("kwargs", {})
+    kwargs = {**kwargs, "render_mode": "rgb_array" if record_video else None}
+    env = gym.make(env_cfg.env_id, **kwargs)
+
+    if "wrappers" in env_cfg:
+        for wrapper in env_cfg.wrappers:
+            env = hydra.utils.instantiate(wrapper, env=env)
+
+    return env
 
 
 def count_parameters(model: torch.nn.Module) -> int:

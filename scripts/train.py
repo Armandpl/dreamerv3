@@ -1,7 +1,6 @@
 import copy
 from pathlib import Path
 
-import gymnasium as gym
 import hydra
 import torch
 from gymnasium.wrappers import RecordVideo
@@ -26,7 +25,7 @@ from minidream.networks import (
     run_rollout,
 )
 from minidream.replay_buffer import ReplayBuffer
-from minidream.utils import count_parameters, save_model_to_artifacts
+from minidream.utils import count_parameters, save_model_to_artifacts, setup_env
 
 # Tuning the HPs = losing
 # Actor Critic
@@ -345,14 +344,8 @@ def main(cfg: DictConfig):
             config=OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True),
         )
 
-    # setup env
-    kwargs = cfg.env.get("kwargs", {})
-    kwargs = {**kwargs, "render_mode": "rgb_array" if cfg.record_video else None}
-    env = gym.make(cfg.env.env_id, **kwargs)
-
-    if "wrappers" in cfg.env:
-        for wrapper in cfg.env.wrappers:
-            env = hydra.utils.instantiate(wrapper, env=env)
+    # instantiate env and wrappers
+    env = setup_env(cfg.env, record_video=cfg.record_video)
 
     replay_buffer = ReplayBuffer(min(REPLAY_CAPACITY, cfg.max_steps), env.observation_space)
 
