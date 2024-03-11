@@ -446,7 +446,7 @@ def main(cfg: DictConfig):
         env = RecordVideo(
             env, video_folder=run.dir, video_length=1000, step_trigger=lambda _: True
         )
-        run_rollout(env, None, actor, world_model, device=device)
+        run_rollout(env, actor, world_model, device=device)
         env.close()
         wandb.log({"video": wandb.Video(str(Path(run.dir) / "rl-video-step-0.mp4"))})
 
