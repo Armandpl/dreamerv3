@@ -192,20 +192,20 @@ class Decoder(nn.Module):
         super().__init__()
         self.cnn_output_dim = cnn_output_dim
         if cnn_output_dim is not None:
-            self.decnn = make_cnn(deconv=True, input_channels=observation_space.shape[0])
+            # TODO
+            if observation_space.shape[1] == 10:
+                stride = 1
+            else:
+                stride = 2
 
-        # TODO
-        if observation_space.shape[1] == 10:
-            stride = 1
-        else:
-            stride = 2
+            # self.decnn = make_cnn(deconv=True, input_channels=observation_space.shape[0], stride=stride)
+            self.decnn = make_cnn_2(deconv=True, observation_space=observation_space)
 
         self.mlp = make_mlp(
             input_dim=STOCHASTIC_STATE_SIZE**2 + GRU_RECCURENT_UNITS,
             output_dim=np.prod(cnn_output_dim)
             if cnn_output_dim is not None
             else observation_space.shape[0],
-            stride=stride,
         )
 
     def forward(self, ht, zt):
@@ -239,7 +239,8 @@ class Encoder(nn.Module):
             stride = 1
         else:
             stride = 2
-        self.net = make_cnn(input_channels=observation_space.shape[0], stride=stride)
+        # self.net = make_cnn(input_channels=observation_space.shape[0], stride=stride)
+        self.net = make_cnn_2(observation_space=observation_space)
 
     def forward(self, x):
         # x is of shape (..., c, h, w)
@@ -389,6 +390,48 @@ def make_mlp(
     net.apply(weight_init)
 
     return net
+
+
+def make_cnn_2(
+    observation_space: gymnasium.spaces.Box,
+    stages=CNN_STAGES,
+    multiplier=CNN_MULTIPLIER,
+    deconv=False,
+):
+    dummy_input = torch.zeros(1, *observation_space.shape)
+    input_channels = observation_space.shape[0]
+
+    # TODO ugly hardcode still
+    # maybe have the cnn kernel, stride and padding in env configs?
+    stride = 1 if observation_space.shape[1] == 10 else 2
+
+    layers = []
+    channels = [input_channels]
+    channels += [i * 2 * multiplier for i in range(1, stages + 1)]
+    if deconv:
+        channels = channels[::-1]
+        layer = torch.nn.ConvTranspose2d
+        # instantiate the same cnn in conv mode, pass the dummy input to it and get the output shape
+        # which will be the input shape for the de-cnn
+        dummy_input = make_cnn_2(observation_space, stages, multiplier, deconv=False)(dummy_input)
+    else:
+        layer = torch.nn.Conv2d
+
+    for i in range(len(channels) - 1):
+        layers.append(
+            layer(
+                in_channels=channels[i],
+                out_channels=channels[i + 1],
+                kernel_size=4,
+                stride=stride,
+                padding=1,
+            )
+        )
+        dummy_input = layers[-1](dummy_input)
+        layers.append(torch.nn.LayerNorm(dummy_input.shape[1:]))
+        layers.append(torch.nn.SiLU())
+
+    return torch.nn.Sequential(*layers)
 
 
 def make_cnn(
