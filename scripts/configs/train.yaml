@@ -2,7 +2,7 @@ defaults:
   - _self_
   - env: ???
 
-max_steps: 1025
+max_steps: 150_000
 train_ratio: 1024
 learning_starts: 1024
 save_model: True

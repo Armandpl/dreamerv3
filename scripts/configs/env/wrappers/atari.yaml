@@ -1,1 +1,1 @@
-- _target_: minidream.wrappers.PreProcessAtari
+- _target_: dreamer.wrappers.PreProcessAtari

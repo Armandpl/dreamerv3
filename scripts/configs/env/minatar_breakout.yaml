@@ -1,0 +1,6 @@
+defaults:
+  - _self_
+  - wrappers: minatar
+
+env_id: "MinAtar/Breakout-v1"
+env_kwargs: null
