@@ -1,3 +1,0 @@
-- _target_: furuta.rl.wrappers.MCAPLogger
-  use_sim_time: False # fix logger
-  log_dir: "../data/mcap/sim/"

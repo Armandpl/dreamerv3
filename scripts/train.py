@@ -1,30 +1,31 @@
 import copy
+from pathlib import Path
 
-import gymnasium
 import hydra
 import torch
-from omegaconf import DictConfig
+from gymnasium.wrappers import RecordVideo
+from omegaconf import DictConfig, OmegaConf
 from torch.distributions import Independent
 from torch.distributions.kl import kl_divergence
 from tqdm import trange
 
 import wandb
-from minidream.dist import BernoulliSafeMode
-from minidream.dist import OneHotDist as OneHotCategoricalStraightThrough
-from minidream.dist import TwoHotEncodingDistribution
-from minidream.functional import compute_lambda_returns, symlog
-from minidream.networks import (
+from dreamer.distributions import (
+    BernoulliSafeMode,
+    OneHotCategoricalStraightThroughUnimix,
+    TwoHotEncodingDistribution,
+)
+from dreamer.functional import compute_lambda_returns, symlog
+from dreamer.networks import (
     GRU_RECCURENT_UNITS,
     RSSM,
     STOCHASTIC_STATE_SIZE,
     Actor,
     Critic,
+    run_rollout,
 )
-from minidream.rb import ReplayBuffer
-from minidream.utils import count_parameters, sg
-from minidream.wrappers import PreProcessMinatar
-
-DEBUG = False  # wether or not to use wandb
+from dreamer.replay_buffer import ReplayBuffer
+from dreamer.utils import count_parameters, save_model_to_artifacts, setup_env
 
 # Tuning the HPs = losing
 # Actor Critic
@@ -44,16 +45,24 @@ BETA_REP = 0.1
 MIN_SYMLOG_DISTANCE = 1e-8
 WM_LR = 1e-4
 WM_ADAM_EPSILON = 1e-8
-WM_GRADIENT_CLIP = 1000.0  # TODO do we have to clip norm or values? nm512 clips norm
+WM_GRADIENT_CLIP = 1000.0
 
-#
-TRAIN_RATIO = 64  # ratio between real steps and imagined steps
-REPLAY_CAPACITY = 1_000_000  # FIFO
+# Training
+REPLAY_CAPACITY = 1_000_000
 BATCH_SIZE = 16
-BATCH_LENGTH = 64
+SEQ_LEN = 64
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+# TODO use sg in the same place it was used in the paper equations
+# else use torch.no_grad()
+# TODO double check to make sure we don't detache not attached tensors
+# to save chars, for readability
+# put it at the top of the code so ppl that haven't read the the paper don't get confused
+def sg(x):
+    return x.detach()
 
 
 def run_world_model(data, world_model):
@@ -126,7 +135,14 @@ def train_step_world_model(
     distance = torch.where(
         distance < MIN_SYMLOG_DISTANCE, 0, distance
     )  # got that from the offical implem
-    recon_loss = distance.sum(dim=[-1, -2, -3])  # TODO -1 for vector obs, -3 for image obs
+
+    # sum over all dims except the batch and time dim
+    sum_dims = [-i for i in range(1, len(reconstructed_obs.shape[2:]) + 1)]
+    # TODO should we average instead?
+    # for images the recon loss is way bigger than the other losses
+    # is that a problem, is it dwarfing the other losses???
+    recon_loss = distance.sum(dim=sum_dims)
+    # recon_loss = distance.mean(dim=sum_dims)
 
     pred_rewards_distrib = TwoHotEncodingDistribution(pred_rewards_logits, dims=1)
     rew_loss = -pred_rewards_distrib.log_prob(data["reward"])  # sum over the last dim
@@ -135,6 +151,8 @@ def train_step_world_model(
         BernoulliSafeMode(logits=pred_continues),
         1,
     ).log_prob(1.0 - data["done"])
+
+    # TODO assert the shapes are the same so that we don't broadcast erroneously
     loss_pred = (recon_loss + rew_loss + continue_loss).mean()  # average accross batch and time
 
     # kl loss
@@ -143,17 +161,17 @@ def train_step_world_model(
     loss_dyn = torch.max(
         free_nats,
         kl_divergence(
-            Independent(OneHotCategoricalStraightThrough(logits=posteriors_logits.detach()), 1),
-            Independent(OneHotCategoricalStraightThrough(logits=priors_logits), 1),
+            Independent(OneHotCategoricalStraightThroughUnimix(logits=sg(posteriors_logits)), 1),
+            Independent(OneHotCategoricalStraightThroughUnimix(logits=priors_logits), 1),
         ).mean(),
     )
     loss_rep = torch.max(
         free_nats,
         kl_divergence(
             Independent(  # independant is so that each event is independant
-                OneHotCategoricalStraightThrough(logits=posteriors_logits), 1
+                OneHotCategoricalStraightThroughUnimix(logits=posteriors_logits), 1
             ),
-            Independent(OneHotCategoricalStraightThrough(logits=priors_logits.detach()), 1),
+            Independent(OneHotCategoricalStraightThroughUnimix(logits=sg(priors_logits)), 1),
         ).mean(),
     )
 
@@ -233,8 +251,8 @@ def train_actor_critic(
     # at least that's what I understand rn
     continues = Independent(
         BernoulliSafeMode(logits=world_model.continue_model(hts, zts)), 1
-    ).mode  # TODO can we just do > 0.5?
-    # make sur we don't use imagined trajectories from terminal states
+    ).mode  # Do we need to use independant here? TODO
+    # make sur we don't use imagine trajectories from terminal states
     # so get the real termination flags for step=0
     true_done = data["done"].view(-1, 1)
     continues[:, 0] = 1.0 - true_done[:, :1]
@@ -298,13 +316,13 @@ def train_actor_critic(
 
     return {
         "agent/imagined_actions_distrib": wandb.Histogram(
-            ats.view(-1).to(torch.long).cpu().detach().numpy()
+            ats.view(-1).to(torch.long).detach().cpu().numpy()
         ),
         "agent/pred_values_distrib": wandb.Histogram(values.view(-1).cpu().detach().numpy()),
         "agent/pred_values_mean": values.mean(),
         "agent/lambda_values_mean": lambda_returns.mean(),
         "agent/lambda_values_distrib": wandb.Histogram(
-            lambda_returns.view(-1).cpu().detach().numpy()
+            lambda_returns.view(-1).detach().cpu().numpy()
         ),
         "agent/actor_loss": actor_loss,
         "agent/critic_loss": critic_loss,
@@ -317,63 +335,21 @@ def train_actor_critic(
     }
 
 
-def collect_rollout(env, replay_buffer, actor: Actor = None, rssm: RSSM = None):
-    use_actor = actor is not None and rssm is not None
-    with torch.no_grad():
-        obs, _ = env.reset()
-        if use_actor:
-            ht_minus_1 = torch.zeros(1, GRU_RECCURENT_UNITS, device=device)
-            zt_minus_1 = torch.zeros(
-                1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE, device=device
-            )
-            # zt_dist, _ = rssm.representation_model(
-            #     torch.tensor(obs).unsqueeze(0).to(device), ht_minus_1
-            # )
-            # zt_minus_1 = zt_dist.sample()
-
-        done = False
-        first = True
-        episode_return = 0
-
-        while not done:
-            if use_actor:
-                act_dist = actor(ht_minus_1, zt_minus_1)
-                act = act_dist.sample()
-                act = act.unsqueeze(0)
-                ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
-                act = act.cpu()
-            else:
-                act = env.action_space.sample()
-
-            obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
-            episode_return += reward
-
-            if use_actor:
-                encoded_obs = rssm.encoder(torch.tensor(obs).unsqueeze(0).to(device))
-                zt_dist, _ = rssm.representation_model(encoded_obs, ht_minus_1)
-                zt_minus_1 = zt_dist.sample()
-
-            done = terminated or truncated
-
-            if replay_buffer is not None:
-                # replay_buffer.add(act, obs, reward, terminated, first)
-                replay_buffer.add(act, obs, reward, done, first)
-            first = False
-    return episode_return
-
-
 @hydra.main(version_base="1.3", config_path="configs", config_name="train.yaml")
 def main(cfg: DictConfig):
-    if not DEBUG:
-        run = wandb.init(project="minidream_dev", job_type="train")
+    if cfg.use_wandb:
+        run = wandb.init(
+            project=cfg.wandb_project,
+            job_type="train",
+            config=OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True),
+        )
 
-    # setup env
-    # env = gymnasium.make("CartPole-v1")
-    env = gymnasium.make("MinAtar/Breakout-v1")
-    env = PreProcessMinatar(env)
-    replay_buffer = ReplayBuffer(REPLAY_CAPACITY, env.action_space, env.observation_space)
+    # instantiate env and wrappers
+    env = setup_env(cfg.env, render_mode="rgb_array" if cfg.record_video else None)
 
-    # setup models and opts
+    replay_buffer = ReplayBuffer(min(REPLAY_CAPACITY, cfg.max_steps), env.observation_space)
+
+    # setup models and optimizers
     world_model = RSSM(
         observation_space=env.observation_space,
         action_space=env.action_space,
@@ -401,7 +377,7 @@ def main(cfg: DictConfig):
     for global_step in trange(cfg.max_steps):
 
         if done:
-            if not DEBUG:
+            if cfg.use_wandb:
                 run.log(
                     {
                         "episode_return": episode_return,
@@ -449,9 +425,9 @@ def main(cfg: DictConfig):
         zt_minus_1 = zt_dist.sample()
 
         if (
-            replay_buffer.count % (cfg.batch_size * cfg.seq_len // TRAIN_RATIO) == 0
+            replay_buffer.count % (BATCH_SIZE * SEQ_LEN // cfg.train_ratio) == 0
         ) and replay_buffer.count > cfg.learning_starts:  # should train
-            data = replay_buffer.sample(cfg.batch_size, cfg.seq_len).to(device)
+            data = replay_buffer.sample(BATCH_SIZE, SEQ_LEN).to(device)
 
             hts, zts, zts_logits = run_world_model(data, world_model)
             wm_loss_dict = train_step_world_model(data, hts, zts, zts_logits, world_model, wm_opt)
@@ -460,16 +436,22 @@ def main(cfg: DictConfig):
             )
 
             loss_dict = {**wm_loss_dict, **actor_critic_loss_dict}
-            if not DEBUG:
+            if cfg.use_wandb:
                 run.log({**loss_dict, "global_step": global_step})
 
-    if not DEBUG:
-        run.finish()
+    if cfg.save_model and cfg.use_wandb:
+        save_model_to_artifacts(run.dir, world_model, actor, critic, name="model")
 
-    # save models
-    torch.save(world_model.state_dict(), "../data/world_model.pth")
-    torch.save(actor.state_dict(), "../data/actor.pth")
-    # TODO write inference script
+    if cfg.use_wandb and cfg.record_video:
+        env = RecordVideo(
+            env, video_folder=run.dir, video_length=1000, step_trigger=lambda _: True
+        )
+        run_rollout(env, actor, world_model, device=device)
+        env.close()
+        wandb.log({"video": wandb.Video(str(Path(run.dir) / "rl-video-step-0.mp4"))})
+
+    if cfg.use_wandb:
+        run.finish()
 
 
 if __name__ == "__main__":

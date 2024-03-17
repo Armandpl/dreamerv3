@@ -1,5 +1,11 @@
-data_dir: "../data/sim_mcap_dataset"
-seq_len: 64
-batch_size: 16
-iterations: 20
-learning_starts: 5000
+defaults:
+  - _self_
+  - env: ???
+
+max_steps: 150_000
+train_ratio: 1024
+learning_starts: 1024
+save_model: True
+use_wandb: True
+wandb_project: "minidream_dev"
+record_video: True

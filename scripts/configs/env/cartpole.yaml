@@ -1,0 +1,6 @@
+defaults:
+  - _self_
+  - wrappers: null
+
+env_id: "CartPole-v1"
+env_kwargs: null

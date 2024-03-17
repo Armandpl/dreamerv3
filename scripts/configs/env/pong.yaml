@@ -1,0 +1,4 @@
+defaults:
+  - atari
+
+env_id: "ALE/Pong-v5"
