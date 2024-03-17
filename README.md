@@ -6,8 +6,10 @@ Training real robots adds non-trivial constraints:
 `CartPole-v1` is a good debug problem to try out RL aglorithms: it is well known, doesn't require much compute to run. It is also 'easy' and quick (wall clock time) to train. We're using it's physical counterpart, [a real (rotary) cartpole robot](https://github.com/Armandpl/furuta).
 
 # Benchmarks
-[bench against danijar pacman]
-[bench against minatar breakout and space invader]
+![](scores/atari_ms_pacman.jpg)
+![](scores/atari_pong.jpg)
+Not sure why that's not matching. Maybe because the official implementation is using a resnet and we're using a vanilla cnn? maybe the network sizes don't match? or maybe the training ratio?
+[todo: bench against minatar breakout and space invader]
 
 # Credits
 This is based off of the following implementations:
