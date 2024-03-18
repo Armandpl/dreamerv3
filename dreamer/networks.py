@@ -318,7 +318,7 @@ class PredModel(nn.Module):
         return self.net(torch.cat([ht, zt], dim=-1))
 
 
-def run_rollout(env, actor: Actor, rssm: RSSM, device: str = "cpu"):
+def run_rollout(env, actor: Actor, rssm: RSSM, device: str = "cpu", render: bool = True):
     with torch.no_grad():
         obs, _ = env.reset()
         ht_minus_1 = torch.zeros(1, GRU_RECCURENT_UNITS, device=device)
@@ -337,6 +337,8 @@ def run_rollout(env, actor: Actor, rssm: RSSM, device: str = "cpu"):
             act = act.cpu()
 
             obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
+            if render:
+                env.render()
             episode_return += reward
 
             encoded_obs = rssm.encoder(torch.tensor(obs).unsqueeze(0).to(device))
