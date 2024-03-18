@@ -1,9 +1,10 @@
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import gymnasium
 import numpy as np
 import torch
 from torch import Tensor, nn
+from torch.distributions import Independent
 
 from dreamer.distributions import (
     OneHotCategoricalStraightThroughUnimix,
@@ -25,7 +26,9 @@ CNN_STAGES = 4
 
 class RSSM(nn.Module):
     def __init__(
-        self, observation_space: gymnasium.spaces.Box, action_space: gymnasium.spaces.Discrete
+        self,
+        observation_space: gymnasium.spaces.Box,
+        action_space: Union[gymnasium.spaces.Box, gymnasium.spaces.Discrete],
     ):
         super().__init__()
         self.observation_space = observation_space
@@ -117,12 +120,18 @@ class RecurrentModel(nn.Module):
 
     def __init__(
         self,
-        action_space: gymnasium.spaces.Box,
+        action_space: Union[gymnasium.spaces.Box, gymnasium.spaces.Discrete],
     ):
         super().__init__()
         self.action_space = action_space
+        in_action_shape = (
+            action_space.shape[0]
+            if isinstance(self.action_space, gymnasium.spaces.Box)
+            else self.action_space.n
+        )
+
         self.mlp = make_mlp(
-            input_dim=STOCHASTIC_STATE_SIZE**2 + self.action_space.n,
+            input_dim=STOCHASTIC_STATE_SIZE**2 + in_action_shape,
             output_dim=GRU_RECCURENT_UNITS,
         )
 
@@ -254,17 +263,28 @@ class Encoder(nn.Module):
 
 
 class Actor(nn.Module):
-    def __init__(self, action_space: gymnasium.spaces.Discrete):
+    def __init__(self, action_space: Union[gymnasium.spaces.Box, gymnasium.spaces.Discrete]):
         super().__init__()
         self.action_space = action_space
-        self.net = PredModel(action_space.n, output_init=uniform_init_weights(1.0))
+        out_action_shape = (
+            action_space.shape[0] * 2
+            if isinstance(action_space, gymnasium.spaces.Box)
+            else action_space.n
+        )
+        self.net = PredModel(out_action_shape, output_init=uniform_init_weights(1.0))
 
     def forward(self, ht, zt):
-        # TODO we need an actor for continuous action
-        # do we model a normal dist in this case?
         output = self.net(ht, zt)
-        dist = torch.distributions.Categorical(logits=output)  # TODO add unimix?
-        return dist
+        if isinstance(self.action_space, gymnasium.spaces.Discrete):
+            dist = torch.distributions.Categorical(logits=output)
+            act = dist.sample().unsqueeze(-1)
+        else:
+            mean, std = torch.chunk(output, 2, dim=-1)
+            std = torch.nn.functional.softplus(std)
+            # TODO do we need Independant?
+            dist = Independent(torch.distributions.Normal(loc=mean, scale=std), 1)
+            act = dist.rsample()
+        return dist, act
 
 
 class Critic(nn.Module):
@@ -312,9 +332,7 @@ def run_rollout(env, actor: Actor, rssm: RSSM, device: str = "cpu"):
         episode_return = 0
 
         while not done:
-            act_dist = actor(ht_minus_1, zt_minus_1)
-            act = act_dist.sample()
-            act = act.unsqueeze(0)
+            _, act = actor(ht_minus_1, zt_minus_1)
             ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
             act = act.cpu()
 

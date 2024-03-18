@@ -1,7 +1,10 @@
 import copy
 from pathlib import Path
 
+import furuta
+import gymnasium as gym
 import hydra
+import numpy as np
 import torch
 from gymnasium.wrappers import RecordVideo
 from omegaconf import DictConfig, OmegaConf
@@ -221,7 +224,12 @@ def train_actor_critic(
         STOCHASTIC_STATE_SIZE,
         device=device,
     )
-    ats = torch.empty(batch_size * seq_len, IMAGINE_HORIZON + 1, 1, device=device)
+    if isinstance(actor.action_space, gym.spaces.Box):
+        action_shape = actor.action_space.shape[0]
+    elif isinstance(actor.action_space, gym.spaces.Discrete):
+        action_shape = 1
+
+    ats = torch.empty(batch_size * seq_len, IMAGINE_HORIZON + 1, action_shape, device=device)
 
     # imagine trajectories, starting from sampled data
     # use each step sampled from the env as the start for a new trajectory
@@ -229,23 +237,24 @@ def train_actor_critic(
     zts[:, 0] = replayed_zts.view(
         -1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE
     ).detach()  # .contiguous()
-    ats[:, 0] = actor(hts[:, 0], zts[:, 0]).sample().unsqueeze(1)
+    _, ats[:, 0] = actor(hts[:, 0], zts[:, 0])
 
-    with torch.no_grad():  # TODO torch no grad bc we not training the wm?
-        for i in range(1, IMAGINE_HORIZON + 1):
-            # predict the current recurrent state ht from the past
-            hts[:, i] = world_model.recurrent_model(hts[:, i - 1], zts[:, i - 1], ats[:, i - 1])
-            # from that predict the stochastic state, and sample from it
-            zt_dist, _ = world_model.transition_model(hts[:, i])
-            zts[:, i] = zt_dist.sample()
-            ats[:, i] = actor(hts[:, i], zts[:, i]).sample().unsqueeze(1)
+    # with torch.no_grad():  # TODO torch no grad bc we not training the wm?
+    for i in range(1, IMAGINE_HORIZON + 1):
+        # with torch.no_grad():
+        # predict the current recurrent state ht from the past
+        hts[:, i] = world_model.recurrent_model(hts[:, i - 1], zts[:, i - 1], ats[:, i - 1])
+        # from that predict the stochastic state, and sample from it
+        zt_dist, _ = world_model.transition_model(hts[:, i])
+        zts[:, i] = zt_dist.sample()
+        _, ats[:, i] = actor(hts[:, i], zts[:, i])
 
     # after doing the recurrent stuff we will do the reward, critic and continue predictions
     pred_rewards = TwoHotEncodingDistribution(
         logits=world_model.reward_model(sg(hts), sg(zts)), dims=1
     ).mean
     # values_dist = critic(sg(hts), sg(zts)) # do we need to use independant here? TODO
-    values = critic(sg(hts), sg(zts)).mean  # (B, T, 1)
+    values = critic(hts, zts).mean  # (B, T, 1)
     # independant bc for each element of the batch, at each step the event is independant of
     # 1. the rest of the batch and 2. the rest of the traj since we predict it from the markov state
     # at least that's what I understand rn
@@ -268,7 +277,34 @@ def train_actor_critic(
         pred_rewards, values, continues, GAMMA, RETURN_LAMBDA
     )  # (B, HORIZON, 1)
 
-    # TODO should we train the actor or the critic first?
+    # train the actor
+    actor_opt.zero_grad()
+
+    offset, invscale = world_model.return_ema(lambda_returns)
+    normed_lambda_returns = (lambda_returns - offset) / invscale
+    normed_values = (values[:, :-1] - offset) / invscale
+    advantage = normed_lambda_returns - normed_values
+
+    policy, _ = actor(
+        sg(hts[:, :-1]),
+        sg(zts[:, :-1]),  # loose one bc of lambda, loose one bc lambda return is at t+1
+    )  # TODO we've done this computation once already, can we cache it?
+
+    if isinstance(actor.action_space, gym.spaces.Box):
+        actor_loss = -advantage.squeeze(-1)
+    else:
+        logpi = policy.log_prob(sg(ats[:, :-1]).squeeze(-1))
+        actor_loss = -logpi * sg(advantage.squeeze(-1))
+
+    actor_entropy = policy.entropy().view(batch_size * seq_len, IMAGINE_HORIZON)
+    actor_loss -= ACTOR_ENTROPY * actor_entropy
+    actor_loss = actor_loss * sg(traj_weight[:, :-1])
+    actor_loss = actor_loss.mean()
+    actor_loss.backward()
+    actor_grad_norm = torch.nn.utils.clip_grad_norm_(actor.parameters(), ACTOR_GRADIENT_CLIP)
+    actor_opt.step()
+
+    # train the critic
     critic_opt.zero_grad()
     # TODO re compute the value dist for traj[:, :-1]
     values_dist = critic(sg(hts[:, :-1]), sg(zts[:, :-1]))
@@ -284,6 +320,7 @@ def train_actor_critic(
     # ok so i think the traj weight isnt a discount thing its to stop training after receiving the continue=0 flag
     critic_loss = critic_loss * sg(traj_weight[:, :-1])
     critic_loss = critic_loss.mean()
+
     critic_loss.backward()
     critic_grad_norm = torch.nn.utils.clip_grad_norm_(critic.parameters(), ACTOR_GRADIENT_CLIP)
     critic_opt.step()
@@ -291,28 +328,6 @@ def train_actor_critic(
     # update the slow critic by mixing it with the critic
     for s, d in zip(critic.parameters(), slow_critic.parameters()):
         d.data = (1 - CRITIC_EMA_DECAY) * s.data + CRITIC_EMA_DECAY * d.data
-
-    # train the actor
-    actor_opt.zero_grad()
-
-    offset, invscale = world_model.return_ema(lambda_returns)
-    normed_lambda_returns = (lambda_returns - offset) / invscale
-    normed_values = (values[:, :-1] - offset) / invscale
-    advantage = normed_lambda_returns - normed_values
-
-    policy = actor(
-        sg(hts[:, :-1]),
-        sg(zts[:, :-1]),  # loose one bc of lambda, loose one bc lambda return is at t+1
-    )  # TODO we've done this computation once already, can we cache it?
-    logpi = policy.log_prob(sg(ats[:, :-1]).squeeze(-1))
-    actor_loss = -logpi * sg(advantage.squeeze(-1))
-    actor_entropy = policy.entropy()
-    actor_loss -= ACTOR_ENTROPY * actor_entropy
-    actor_loss = actor_loss * sg(traj_weight[:, :-1])
-    actor_loss = actor_loss.mean()
-    actor_loss.backward()
-    actor_grad_norm = torch.nn.utils.clip_grad_norm_(actor.parameters(), ACTOR_GRADIENT_CLIP)
-    actor_opt.step()
 
     return {
         "agent/imagined_actions_distrib": wandb.Histogram(
@@ -322,7 +337,7 @@ def train_actor_critic(
         "agent/pred_values_mean": values.mean(),
         "agent/lambda_values_mean": lambda_returns.mean(),
         "agent/lambda_values_distrib": wandb.Histogram(
-            lambda_returns.view(-1).detach().cpu().numpy()
+            lambda_returns.reshape(-1).detach().cpu().numpy()
         ),
         "agent/actor_loss": actor_loss,
         "agent/critic_loss": critic_loss,
@@ -347,7 +362,9 @@ def main(cfg: DictConfig):
     # instantiate env and wrappers
     env = setup_env(cfg.env, render_mode="rgb_array" if cfg.record_video else None)
 
-    replay_buffer = ReplayBuffer(min(REPLAY_CAPACITY, cfg.max_steps), env.observation_space)
+    replay_buffer = ReplayBuffer(
+        min(REPLAY_CAPACITY, cfg.max_steps), env.observation_space, env.action_space
+    )
 
     # setup models and optimizers
     world_model = RSSM(
@@ -406,9 +423,7 @@ def main(cfg: DictConfig):
 
         # choose action w/ actor
         with torch.no_grad():
-            act_dist = actor(ht_minus_1, zt_minus_1)
-            act = act_dist.sample()
-            act = act.unsqueeze(0)
+            _, act = actor(ht_minus_1, zt_minus_1)
             ht_minus_1 = world_model.recurrent_model(ht_minus_1, zt_minus_1, act)
             act = act.cpu().squeeze(0).item()
 
@@ -424,9 +439,12 @@ def main(cfg: DictConfig):
         zt_dist, _ = world_model.representation_model(encoded_obs, ht_minus_1)
         zt_minus_1 = zt_dist.sample()
 
-        if (
-            replay_buffer.count % (BATCH_SIZE * SEQ_LEN // cfg.train_ratio) == 0
-        ) and replay_buffer.count > cfg.learning_starts:  # should train
+        if not cfg.episodic:
+            should_train = replay_buffer.count % (BATCH_SIZE * SEQ_LEN // cfg.train_ratio) == 0
+        else:
+            should_train = done
+
+        if should_train and replay_buffer.count > cfg.learning_starts:  # should train
             data = replay_buffer.sample(BATCH_SIZE, SEQ_LEN).to(device)
 
             hts, zts, zts_logits = run_world_model(data, world_model)

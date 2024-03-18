@@ -1,6 +1,9 @@
+from typing import Optional
+
 import cv2
 import gymnasium as gym
 import numpy as np
+from gymnasium.spaces import Box
 
 
 class PreProcessMinatar(gym.Wrapper):
@@ -68,3 +71,80 @@ class PreProcessAtari(gym.Wrapper):
         obs = (obs * 2) - 1
 
         return obs, total_rew, glob_terminated, glob_truncated, {}
+
+
+# TODO remove tmp wrappers
+class DivergedSim(gym.Wrapper):
+    """Check if furuta sim has diverged, if so, terminate the episode."""
+
+    def step(self, action):
+        action = np.array([action])
+        action = np.clip(action, -1, 1)
+        obs, reward, terminated, truncated, info = self.env.step(action)
+
+        if np.any(np.isnan(obs)) or np.any(np.isinf(obs)):
+            terminated = True
+            obs = np.zeros_like(obs)
+            reward = 0.0
+
+        return obs, reward, terminated, truncated, info
+
+
+class HistoryWrapper(gym.Wrapper):
+    """Track history of observations for given amount of steps Initial steps are zero-filled."""
+
+    def __init__(self, env: gym.Env, steps: int, use_continuity_cost: bool):
+        super().__init__(env)
+        assert steps > 1, "steps must be > 1"
+        self.steps = steps
+        self.use_continuity_cost = use_continuity_cost
+
+        # concat obs with action
+        self.step_low = np.concatenate([self.observation_space.low, self.action_space.low])
+        self.step_high = np.concatenate([self.observation_space.high, self.action_space.high])
+
+        # stack for each step
+        obs_low = np.tile(self.step_low, (self.steps, 1))
+        obs_high = np.tile(self.step_high, (self.steps, 1))
+
+        self.observation_space = Box(low=obs_low.flatten(), high=obs_high.flatten())
+
+        self.history = self._make_history()
+
+    def _make_history(self):
+        return [np.zeros_like(self.step_low) for _ in range(self.steps)]
+
+    def _continuity_cost(self, obs):
+        # TODO compute continuity cost for all steps and average?
+        # and compare smoothness between training run, and viz smoothness over time
+        action = obs[-1][-1]
+        last_action = obs[-2][-1]
+        continuity_cost = np.power((action - last_action), 2).sum()
+
+        return continuity_cost
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        self.history.pop(0)
+
+        obs = np.concatenate([obs, action])
+        self.history.append(obs)
+        obs = np.array(self.history, dtype=np.float32)
+
+        if self.use_continuity_cost:
+            continuity_cost = self._continuity_cost(obs)
+            reward -= continuity_cost
+            info["continuity_cost"] = continuity_cost
+
+        return obs.flatten(), reward, terminated, truncated, info
+
+    def reset(
+        self,
+        seed: Optional[int] = None,
+        options: Optional[dict] = None,
+    ):
+        self.history = self._make_history()
+        self.history.pop(0)
+        obs = np.concatenate([self.env.reset()[0], np.zeros_like(self.env.action_space.low)])
+        self.history.append(obs)
+        return np.array(self.history, dtype=np.float32).flatten(), {}

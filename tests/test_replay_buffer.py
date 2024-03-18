@@ -5,10 +5,11 @@ from dreamer.replay_buffer import ReplayBuffer
 
 max_size = 100
 obs_space = gym.spaces.Box(low=0, high=1, shape=(4,))
+disc_action_space = gym.spaces.Discrete(2)
 
 
 def test_replay_buffer_init():
-    buffer = ReplayBuffer(max_size, obs_space)
+    buffer = ReplayBuffer(max_size, obs_space, disc_action_space)
 
     assert buffer.max_size == max_size
     assert buffer.actions.shape == (max_size, 1)
@@ -20,7 +21,7 @@ def test_replay_buffer_init():
 
 
 def test_replay_buffer_add():
-    buffer = ReplayBuffer(max_size, obs_space)
+    buffer = ReplayBuffer(max_size, obs_space, disc_action_space)
 
     action = np.array([1])
     obs = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
@@ -41,7 +42,7 @@ def test_replay_buffer_add():
 def test_sample():
     """Fill the replay buffer with alternating actions and obs, then sample from it and make sure
     they are still alternating and were not shuffled."""
-    buffer = ReplayBuffer(max_size, obs_space)
+    buffer = ReplayBuffer(max_size, obs_space, disc_action_space)
     for i in range(max_size):
         if i % 2 == 0:
             action = np.array([1])
@@ -67,7 +68,7 @@ def test_sample():
 
 def test_fifo():
     """The replay buffer is FIFO, check first transitions are overwritten when buffer is full."""
-    buffer = ReplayBuffer(max_size, obs_space)
+    buffer = ReplayBuffer(max_size, obs_space, disc_action_space)
 
     # dummy action, obs and reward
     action = np.array([1])

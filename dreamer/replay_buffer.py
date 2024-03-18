@@ -1,3 +1,5 @@
+from typing import Union
+
 import gymnasium as gym
 import numpy as np
 import torch
@@ -10,9 +12,17 @@ class ReplayBuffer:
     Transitions are stored as a flat list, assuming they all come from a single env.
     """
 
-    def __init__(self, max_size: int, obs_space: gym.spaces.Box):
+    def __init__(
+        self,
+        max_size: int,
+        obs_space: gym.spaces.Box,
+        action_space: Union[gym.spaces.Box, gym.spaces.Discrete],
+    ):
         self.max_size = max_size
-        # TODO make that work for continuous action spaces as well as discrete
+        if isinstance(action_space, gym.spaces.Discrete):
+            self.actions = np.empty((max_size, 1), dtype=np.float32)
+        else:
+            self.actions = np.empty((max_size, action_space.shape[0]), dtype=np.float32)
         self.actions = np.empty((max_size, 1), dtype=np.float32)
         self.obs = np.empty((max_size, *obs_space.shape), dtype=np.float32)
         self.rewards = np.empty((max_size, 1), dtype=np.float32)
