@@ -439,19 +439,23 @@ def main(cfg: DictConfig):
         zt_dist, _ = world_model.representation_model(encoded_obs, ht_minus_1)
         zt_minus_1 = zt_dist.sample()
 
-        if not cfg.episodic:
+        if cfg.episodic is None:
             should_train = replay_buffer.count % (BATCH_SIZE * SEQ_LEN // cfg.train_ratio) == 0
         else:
             should_train = done
 
         if should_train and replay_buffer.count > cfg.learning_starts:  # should train
-            data = replay_buffer.sample(BATCH_SIZE, SEQ_LEN).to(device)
+            nb_train_steps_to_run = 1 if cfg.episodic is None else cfg.episodic
+            for _ in range(nb_train_steps_to_run):
+                data = replay_buffer.sample(BATCH_SIZE, SEQ_LEN).to(device)
 
-            hts, zts, zts_logits = run_world_model(data, world_model)
-            wm_loss_dict = train_step_world_model(data, hts, zts, zts_logits, world_model, wm_opt)
-            actor_critic_loss_dict = train_actor_critic(
-                data, hts, zts, world_model, actor, critic, slow_critic, actor_opt, critic_opt
-            )
+                hts, zts, zts_logits = run_world_model(data, world_model)
+                wm_loss_dict = train_step_world_model(
+                    data, hts, zts, zts_logits, world_model, wm_opt
+                )
+                actor_critic_loss_dict = train_actor_critic(
+                    data, hts, zts, world_model, actor, critic, slow_critic, actor_opt, critic_opt
+                )
 
             loss_dict = {**wm_loss_dict, **actor_critic_loss_dict}
             if cfg.use_wandb:
