@@ -337,15 +337,16 @@ def run_rollout(env, actor: Actor, rssm: RSSM, device: str = "cpu", render: bool
             act = act.cpu()
 
             obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
-            if render:
+            done = terminated or truncated
+            # don't render if done bc it can fail w/ diverged furuta sim
+            # TODO fix the root issue
+            if render and not done:
                 env.render()
             episode_return += reward
 
             encoded_obs = rssm.encoder(torch.tensor(obs).unsqueeze(0).to(device))
             zt_dist, _ = rssm.representation_model(encoded_obs, ht_minus_1)
             zt_minus_1 = zt_dist.sample()
-
-            done = terminated or truncated
 
     return episode_return
 
