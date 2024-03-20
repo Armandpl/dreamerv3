@@ -237,7 +237,7 @@ def train_actor_critic(
     zts[:, 0] = replayed_zts.view(
         -1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE
     ).detach()  # .contiguous()
-    _, ats[:, 0] = actor(hts[:, 0], zts[:, 0])
+    _, ats[:, 0], _ = actor(hts[:, 0], zts[:, 0])
 
     # with torch.no_grad():  # TODO torch no grad bc we not training the wm?
     for i in range(1, IMAGINE_HORIZON + 1):
@@ -247,7 +247,7 @@ def train_actor_critic(
         # from that predict the stochastic state, and sample from it
         zt_dist, _ = world_model.transition_model(hts[:, i])
         zts[:, i] = zt_dist.sample()
-        _, ats[:, i] = actor(hts[:, i], zts[:, i])
+        _, ats[:, i], _ = actor(hts[:, i], zts[:, i])
 
     # after doing the recurrent stuff we will do the reward, critic and continue predictions
     pred_rewards = TwoHotEncodingDistribution(
@@ -285,7 +285,7 @@ def train_actor_critic(
     normed_values = (values[:, :-1] - offset) / invscale
     advantage = normed_lambda_returns - normed_values
 
-    policy, _ = actor(
+    policy, _, _ = actor(
         sg(hts[:, :-1]),
         sg(zts[:, :-1]),  # loose one bc of lambda, loose one bc lambda return is at t+1
     )  # TODO we've done this computation once already, can we cache it?
@@ -296,8 +296,10 @@ def train_actor_critic(
         logpi = policy.log_prob(sg(ats[:, :-1]).squeeze(-1))
         actor_loss = -logpi * sg(advantage.squeeze(-1))
 
-    actor_entropy = policy.entropy().view(batch_size * seq_len, IMAGINE_HORIZON)
-    actor_loss -= ACTOR_ENTROPY * actor_entropy
+    if policy is not None:
+        actor_entropy = policy.entropy().view(batch_size * seq_len, IMAGINE_HORIZON)
+        actor_loss -= ACTOR_ENTROPY * actor_entropy
+
     actor_loss = actor_loss * sg(traj_weight[:, :-1])
     actor_loss = actor_loss.mean()
     actor_loss.backward()
@@ -344,7 +346,7 @@ def train_actor_critic(
         "agent/advantage": advantage.mean(),
         "agent/ema_offset": offset.mean(),
         "agent/ema_invscale": invscale.mean(),
-        "agent/entropy": actor_entropy.mean(),
+        "agent/entropy": actor_entropy.mean() if policy is not None else None,
         "agent/actor_grad_norm": actor_grad_norm,
         "agent/critic_grad_norm": critic_grad_norm,
     }
@@ -423,7 +425,7 @@ def main(cfg: DictConfig):
 
         # choose action w/ actor
         with torch.no_grad():
-            _, act = actor(ht_minus_1, zt_minus_1)
+            _, act, _ = actor(ht_minus_1, zt_minus_1)
             ht_minus_1 = world_model.recurrent_model(ht_minus_1, zt_minus_1, act)
             act = act.cpu().squeeze(0).item()
 

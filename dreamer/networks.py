@@ -1,8 +1,10 @@
+import math
 from typing import Callable, Optional, Union
 
 import gymnasium
 import numpy as np
 import torch
+from tensordict.nn import inv_softplus
 from torch import Tensor, nn
 from torch.distributions import Independent
 
@@ -263,28 +265,65 @@ class Encoder(nn.Module):
 
 
 class Actor(nn.Module):
-    def __init__(self, action_space: Union[gymnasium.spaces.Box, gymnasium.spaces.Discrete]):
+    def __init__(
+        self,
+        action_space: Union[gymnasium.spaces.Box, gymnasium.spaces.Discrete],
+        gsde_sample_freq: int = 64,
+    ):
         super().__init__()
         self.action_space = action_space
+
         out_action_shape = (
-            action_space.shape[0] * 2
+            action_space.shape[0]
             if isinstance(action_space, gymnasium.spaces.Box)
             else action_space.n
         )
         self.net = PredModel(out_action_shape, output_init=uniform_init_weights(1.0))
+        self.gsde_sample_freq = gsde_sample_freq
+        state_dim = STOCHASTIC_STATE_SIZE**2 + GRU_RECCURENT_UNITS
+        scale_min = 0.01
+        self.sigma_init = math.sqrt((1.0 - scale_min) / state_dim)
+        self._sample_gsde_noise()
+        # self.register_buffer(
+        #     "_sigma",
+        #         torch.full((action_space.shape[0], state_dim), sigma_init),
+        #     )
+        self.count = 0
 
-    def forward(self, ht, zt):
+    def _sample_gsde_noise(self):
+        self.noise_matrix = (
+            torch.randn(
+                GRU_RECCURENT_UNITS + STOCHASTIC_STATE_SIZE**2, self.action_space.shape[0]
+            )
+            * self.sigma_init
+        )
+
+    def forward(self, ht, zt, explore: bool = True):
+        self.count += 1
+        if self.count % self.gsde_sample_freq == 0:
+            self._sample_gsde_noise()
+
         output = self.net(ht, zt)
+        gsde_noise = None
         if isinstance(self.action_space, gymnasium.spaces.Discrete):
             dist = torch.distributions.Categorical(logits=output)
             act = dist.sample().unsqueeze(-1)
         else:
-            mean, std = torch.chunk(output, 2, dim=-1)
-            std = torch.nn.functional.softplus(std)
-            # TODO do we need Independant?
-            dist = Independent(torch.distributions.Normal(loc=mean, scale=std), 1)
-            act = dist.rsample()
-        return dist, act
+            mean = torch.tanh(output)  # policy output
+
+            if explore:
+                # adding gsde noise on top
+                zt = torch.flatten(zt, start_dim=-2)  # flatten the last two dimensions
+                state = torch.cat([ht, zt], dim=-1)
+
+                gsde_noise = state @ self.noise_matrix.to(state.device)
+                gsde_noise = torch.tanh(gsde_noise)  # TODO eh fuck around and find out
+                act = mean + gsde_noise
+            else:
+                act = mean
+
+            dist = None
+        return dist, act, gsde_noise
 
 
 class Critic(nn.Module):
@@ -332,7 +371,7 @@ def run_rollout(env, actor: Actor, rssm: RSSM, device: str = "cpu", render: bool
         episode_return = 0
 
         while not done:
-            _, act = actor(ht_minus_1, zt_minus_1)
+            _, act = actor(ht_minus_1, zt_minus_1, explore=False)
             ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
             act = act.cpu()
 
