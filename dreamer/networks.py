@@ -371,7 +371,7 @@ def run_rollout(env, actor: Actor, rssm: RSSM, device: str = "cpu", render: bool
         episode_return = 0
 
         while not done:
-            _, act = actor(ht_minus_1, zt_minus_1, explore=False)
+            _, act, _ = actor(ht_minus_1, zt_minus_1, explore=False)
             ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
             act = act.cpu()
 
