@@ -268,61 +268,79 @@ class Actor(nn.Module):
     def __init__(
         self,
         action_space: Union[gymnasium.spaces.Box, gymnasium.spaces.Discrete],
+        use_gsde: bool = True,
         gsde_sample_freq: int = 64,
+        log_std_init: float = -3,
+        clip_mean: float = 2.0,
     ):
         super().__init__()
         self.action_space = action_space
+        self.use_gsde = use_gsde
 
         out_action_shape = (
             action_space.shape[0]
             if isinstance(action_space, gymnasium.spaces.Box)
             else action_space.n
         )
-        self.net = PredModel(out_action_shape, output_init=uniform_init_weights(1.0))
-        self.gsde_sample_freq = gsde_sample_freq
-        state_dim = STOCHASTIC_STATE_SIZE**2 + GRU_RECCURENT_UNITS
-        scale_min = 0.01
-        self.sigma_init = math.sqrt((1.0 - scale_min) / state_dim)
-        self._sample_gsde_noise()
-        # self.register_buffer(
-        #     "_sigma",
-        #         torch.full((action_space.shape[0], state_dim), sigma_init),
-        #     )
-        self.count = 0
-
-    def _sample_gsde_noise(self):
-        self.noise_matrix = (
-            torch.randn(
-                GRU_RECCURENT_UNITS + STOCHASTIC_STATE_SIZE**2, self.action_space.shape[0]
-            )
-            * self.sigma_init
+        self.net = PredModel(DENSE_HIDDEN_UNITS, output_init=uniform_init_weights(1.0))
+        self.head = nn.Sequential(
+            nn.SiLU(),  # TODO should gsde use the activated neuron too?
+            nn.Linear(DENSE_HIDDEN_UNITS, out_action_shape),
         )
+        uniform_init_weights(1.0)(self.head[-1])
+
+        self.gsde_sample_freq = gsde_sample_freq
+        log_std = torch.ones(DENSE_HIDDEN_UNITS, out_action_shape)
+
+        # Transform it to a parameter so it can be optimized
+        self.log_std = nn.Parameter(log_std * log_std_init, requires_grad=True)
+
+        self.count = 0  # so we know when to resample noise
+        self.clip_mean = clip_mean  # for numerical stability w/ gsde
+
+    def _sample_gsde_noise(self) -> None:
+        """Sample weights for the noise exploration matrix, using a centered Gaussian distribution.
+
+        :param batch_size:
+        """
+        self.weights_dist = torch.distributions.Normal(torch.zeros_like(self.log_std), 1)
+        # Reparametrization trick to pass gradients
+        self.exploration_mat = self.weights_dist.rsample()
+        # Pre-compute matrices in case of parallel exploration
+        # self.exploration_matrices = self.weights_dist.rsample((batch_size,))
 
     def forward(self, ht, zt, explore: bool = True):
-        self.count += 1
         if self.count % self.gsde_sample_freq == 0:
             self._sample_gsde_noise()
+        self.count += 1
 
-        output = self.net(ht, zt)
+        features = self.net(ht, zt)
+        output = self.head(features)
         gsde_noise = None
+
         if isinstance(self.action_space, gymnasium.spaces.Discrete):
             dist = torch.distributions.Categorical(logits=output)
             act = dist.sample().unsqueeze(-1)
         else:
-            mean = torch.tanh(output)  # policy output
+            mean_action = output  # policy output
+            if self.clip_mean is not None:
+                mean_action = torch.functional.F.hardtanh(
+                    mean_action, min_val=-self.clip_mean, max_val=self.clip_mean
+                )
 
+            std = torch.exp(self.log_std)
             if explore:
                 # adding gsde noise on top
-                zt = torch.flatten(zt, start_dim=-2)  # flatten the last two dimensions
-                state = torch.cat([ht, zt], dim=-1)
-
-                gsde_noise = state @ self.noise_matrix.to(state.device)
-                gsde_noise = torch.tanh(gsde_noise)  # TODO eh fuck around and find out
-                act = mean + gsde_noise
+                expl_mat = self.exploration_mat.to(features.device) * std
+                gsde_noise = features @ expl_mat
+                act = mean_action + gsde_noise
             else:
-                act = mean
+                act = mean_action
 
-            dist = None
+            # variance = torch.mm(features**2, std ** 2)
+            variance = (features**2) @ (std**2)
+            epsilon = 1e-6
+            dist = torch.distributions.Normal(mean_action, torch.sqrt(variance + epsilon))
         return dist, act, gsde_noise
 
 
