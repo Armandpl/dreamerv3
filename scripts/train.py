@@ -230,6 +230,9 @@ def train_actor_critic(
         action_shape = 1
 
     ats = torch.empty(batch_size * seq_len, IMAGINE_HORIZON + 1, action_shape, device=device)
+    gsde_noises = torch.empty(
+        batch_size * seq_len, IMAGINE_HORIZON + 1, action_shape, device=device
+    )
 
     # imagine trajectories, starting from sampled data
     # use each step sampled from the env as the start for a new trajectory
@@ -237,7 +240,7 @@ def train_actor_critic(
     zts[:, 0] = replayed_zts.view(
         -1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE
     ).detach()  # .contiguous()
-    _, ats[:, 0], _ = actor(hts[:, 0], zts[:, 0])
+    _, ats[:, 0], gsde_noises[:, 0] = actor(hts[:, 0], zts[:, 0])
 
     # with torch.no_grad():  # TODO torch no grad bc we not training the wm?
     for i in range(1, IMAGINE_HORIZON + 1):
@@ -247,7 +250,7 @@ def train_actor_critic(
         # from that predict the stochastic state, and sample from it
         zt_dist, _ = world_model.transition_model(hts[:, i])
         zts[:, i] = zt_dist.sample()
-        _, ats[:, i], _ = actor(hts[:, i], zts[:, i])
+        _, ats[:, i], gsde_noises[:, i] = actor(sg(hts[:, i]), sg(zts[:, i]))
 
     # after doing the recurrent stuff we will do the reward, critic and continue predictions
     pred_rewards = TwoHotEncodingDistribution(
@@ -287,7 +290,7 @@ def train_actor_critic(
 
     policy, _, _ = actor(
         sg(hts[:, :-1]),
-        sg(zts[:, :-1]),  # loose one bc of lambda, loose one bc lambda return is at t+1
+        sg(zts[:, :-1]),  # loose one bc of lambda
     )  # TODO we've done this computation once already, can we cache it?
 
     if isinstance(actor.action_space, gym.spaces.Box):
@@ -296,9 +299,8 @@ def train_actor_critic(
         logpi = policy.log_prob(sg(ats[:, :-1]).squeeze(-1))
         actor_loss = -logpi * sg(advantage.squeeze(-1))
 
-    if policy is not None:
-        actor_entropy = policy.entropy().view(batch_size * seq_len, IMAGINE_HORIZON)
-        actor_loss -= ACTOR_ENTROPY * actor_entropy
+    actor_entropy = policy.entropy().view(batch_size * seq_len, IMAGINE_HORIZON)
+    actor_loss -= ACTOR_ENTROPY * actor_entropy
 
     actor_loss = actor_loss * sg(traj_weight[:, :-1])
     actor_loss = actor_loss.mean()
@@ -333,14 +335,25 @@ def train_actor_critic(
 
     return {
         "agent/imagined_actions_distrib": wandb.Histogram(
-            ats.view(-1).to(torch.long).detach().cpu().numpy()
+            # ats.view(-1).to(torch.long).detach().cpu().numpy()
+            ats.view(-1)
+            .detach()
+            .cpu()
+            .numpy()  # TODO make that work for cont and disc actions
         ),
-        "agent/pred_values_distrib": wandb.Histogram(values.view(-1).cpu().detach().numpy()),
+        "agent/gsde_noise": wandb.Histogram(
+            # ats.view(-1).to(torch.long).detach().cpu().numpy()
+            gsde_noises.view(-1)
+            .detach()
+            .cpu()
+            .numpy()  # TODO make that work for cont and disc actions
+        ),
+        # "agent/pred_values_distrib": wandb.Histogram(values.view(-1).cpu().detach().numpy()),
         "agent/pred_values_mean": values.mean(),
         "agent/lambda_values_mean": lambda_returns.mean(),
-        "agent/lambda_values_distrib": wandb.Histogram(
-            lambda_returns.reshape(-1).detach().cpu().numpy()
-        ),
+        # "agent/lambda_values_distrib": wandb.Histogram(
+        #     lambda_returns.reshape(-1).detach().cpu().numpy()
+        # ),
         "agent/actor_loss": actor_loss,
         "agent/critic_loss": critic_loss,
         "agent/advantage": advantage.mean(),
@@ -349,6 +362,7 @@ def train_actor_critic(
         "agent/entropy": actor_entropy.mean() if policy is not None else None,
         "agent/actor_grad_norm": actor_grad_norm,
         "agent/critic_grad_norm": critic_grad_norm,
+        "agent/gsde_std": torch.exp(actor.log_std).mean().item() if actor.use_gsde else None,
     }
 
 
