@@ -1,10 +1,8 @@
 import copy
 from pathlib import Path
 
-import furuta
 import gymnasium as gym
 import hydra
-import numpy as np
 import torch
 from gymnasium.wrappers import RecordVideo
 from omegaconf import DictConfig, OmegaConf
