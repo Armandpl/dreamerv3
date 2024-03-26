@@ -1,0 +1,6 @@
+- _target_: gymnasium.wrappers.TimeLimit
+  max_episode_steps: 400
+- _target_: furuta.rl.wrappers.HistoryWrapper
+  steps: 2
+  use_continuity_cost: True
+- _target_: dreamer.wrappers.DivergedSim

@@ -901,6 +901,7 @@ develop = false
 [package.dependencies]
 gymnasium = "^0.29.1"
 mcap-protobuf-support = "^0.4.1"
+pygame = "^2.5.2"
 pyserial = "^3.5"
 scipy = "^1.11.4"
 simple-pid = "^2.0.0"
@@ -908,8 +909,8 @@ simple-pid = "^2.0.0"
 [package.source]
 type = "git"
 url = "https://github.com/Armandpl/furuta"
-reference = "HEAD"
-resolved_reference = "a7ba9d56fa53c7becfffa1e71877738e5f0b2785"
+reference = "9ec6de5"
+resolved_reference = "9ec6de56206acd2c11c8a45fe69d62914d52642a"
 
 [[package]]
 name = "gitdb"
@@ -4246,4 +4247,4 @@ cffi = ["cffi (>=1.11)"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.9, <4.0"
-content-hash = "a4c5515448f488b815a1432832fa2541124c3048d3a24864a08c496a3dcee42c"
+content-hash = "18ef33129085563d07bf871264c65406552035ef49df33e786e3d46790267433"
