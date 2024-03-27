@@ -238,7 +238,7 @@ def train_actor_critic(
     zts[:, 0] = replayed_zts.view(
         -1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE
     ).detach()  # .contiguous()
-    _, ats[:, 0], gsde_noises[:, 0] = actor(hts[:, 0], zts[:, 0])
+    _, ats[:, 0], gsde_noises[:, 0] = actor(sg(hts[:, 0]), sg(zts[:, 0]))
 
     # with torch.no_grad():  # TODO torch no grad bc we not training the wm?
     for i in range(1, IMAGINE_HORIZON + 1):
@@ -453,13 +453,13 @@ def main(cfg: DictConfig):
         zt_dist, _ = world_model.representation_model(encoded_obs, ht_minus_1)
         zt_minus_1 = zt_dist.sample()
 
-        if cfg.episodic is None:
+        if cfg.episodic is False:
             should_train = replay_buffer.count % (BATCH_SIZE * SEQ_LEN // cfg.train_ratio) == 0
         else:
             should_train = done
 
         if should_train and replay_buffer.count > cfg.learning_starts:  # should train
-            nb_train_steps_to_run = 1 if cfg.episodic is None else cfg.episodic
+            nb_train_steps_to_run = 1 if cfg.episodic is False else episode_len
             for _ in range(nb_train_steps_to_run):
                 data = replay_buffer.sample(BATCH_SIZE, SEQ_LEN).to(device)
 
