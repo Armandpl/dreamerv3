@@ -3,6 +3,7 @@ from pathlib import Path
 
 import gymnasium as gym
 import hydra
+import numpy as np
 import torch
 from gymnasium.wrappers import RecordVideo
 from omegaconf import DictConfig, OmegaConf
@@ -14,6 +15,7 @@ import wandb
 from dreamer.distributions import (
     BernoulliSafeMode,
     OneHotCategoricalStraightThroughUnimix,
+    TruncatedNormal,
     TwoHotEncodingDistribution,
 )
 from dreamer.functional import compute_lambda_returns, symlog
@@ -228,9 +230,6 @@ def train_actor_critic(
         action_shape = 1
 
     ats = torch.empty(batch_size * seq_len, IMAGINE_HORIZON + 1, action_shape, device=device)
-    gsde_noises = torch.empty(
-        batch_size * seq_len, IMAGINE_HORIZON + 1, action_shape, device=device
-    )
 
     # imagine trajectories, starting from sampled data
     # use each step sampled from the env as the start for a new trajectory
@@ -238,7 +237,7 @@ def train_actor_critic(
     zts[:, 0] = replayed_zts.view(
         -1, STOCHASTIC_STATE_SIZE, STOCHASTIC_STATE_SIZE
     ).detach()  # .contiguous()
-    _, ats[:, 0], gsde_noises[:, 0] = actor(sg(hts[:, 0]), sg(zts[:, 0]))
+    _, ats[:, 0] = actor(sg(hts[:, 0]), sg(zts[:, 0]))
 
     # with torch.no_grad():  # TODO torch no grad bc we not training the wm?
     for i in range(1, IMAGINE_HORIZON + 1):
@@ -248,7 +247,7 @@ def train_actor_critic(
         # from that predict the stochastic state, and sample from it
         zt_dist, _ = world_model.transition_model(hts[:, i])
         zts[:, i] = zt_dist.sample()
-        _, ats[:, i], gsde_noises[:, i] = actor(sg(hts[:, i]), sg(zts[:, i]))
+        _, ats[:, i] = actor(sg(hts[:, i]), sg(zts[:, i]))
 
     # after doing the recurrent stuff we will do the reward, critic and continue predictions
     pred_rewards = TwoHotEncodingDistribution(
@@ -286,7 +285,7 @@ def train_actor_critic(
     normed_values = (values[:, :-1] - offset) / invscale
     advantage = normed_lambda_returns - normed_values
 
-    policy, _, _ = actor(
+    policy, _ = actor(
         sg(hts[:, :-1]),
         sg(zts[:, :-1]),  # loose one bc of lambda
     )  # TODO we've done this computation once already, can we cache it?
@@ -297,7 +296,22 @@ def train_actor_critic(
         logpi = policy.log_prob(sg(ats[:, :-1]).squeeze(-1))
         actor_loss = -logpi * sg(advantage.squeeze(-1))
 
-    actor_entropy = policy.entropy().view(batch_size * seq_len, IMAGINE_HORIZON)
+    if actor.use_gsde:
+        # estimate entropy with log_prob.mean()
+        gaussian_actions = actor.bijector.inverse(ats[:, :-1])
+        # log likelihood for a gaussian
+        log_prob = policy.log_prob(gaussian_actions)
+        # Sum along action dim
+        # log_prob = sum_independent_dims(log_prob)
+        log_prob = log_prob.sum(-1)
+
+        # Squash correction (from original SAC implementation)
+        log_prob -= torch.sum(actor.bijector.log_prob_correction(gaussian_actions), dim=-1)
+
+        actor_entropy = log_prob.mean()
+    else:
+        actor_entropy = policy.entropy().view(batch_size * seq_len, IMAGINE_HORIZON)
+
     actor_loss -= ACTOR_ENTROPY * actor_entropy
 
     actor_loss = actor_loss * sg(traj_weight[:, :-1])
@@ -335,13 +349,6 @@ def train_actor_critic(
         "agent/imagined_actions_distrib": wandb.Histogram(
             # ats.view(-1).to(torch.long).detach().cpu().numpy()
             ats.view(-1)
-            .detach()
-            .cpu()
-            .numpy()  # TODO make that work for cont and disc actions
-        ),
-        "agent/gsde_noise": wandb.Histogram(
-            # ats.view(-1).to(torch.long).detach().cpu().numpy()
-            gsde_noises.view(-1)
             .detach()
             .cpu()
             .numpy()  # TODO make that work for cont and disc actions
@@ -385,7 +392,7 @@ def main(cfg: DictConfig):
         observation_space=env.observation_space,
         action_space=env.action_space,
     ).to(device)
-    actor = Actor(env.action_space).to(device)
+    actor = Actor(env.action_space, cfg.use_gsde).to(device)
     critic = Critic().to(device)
     slow_critic = copy.deepcopy(critic)
 
@@ -437,9 +444,16 @@ def main(cfg: DictConfig):
 
         # choose action w/ actor
         with torch.no_grad():
-            _, act, _ = actor(ht_minus_1, zt_minus_1)
+            _, act = actor(ht_minus_1, zt_minus_1)
             ht_minus_1 = world_model.recurrent_model(ht_minus_1, zt_minus_1, act)
-            act = act.cpu().squeeze(0).item()
+            act = act.cpu().squeeze(0).numpy()
+            if isinstance(env.action_space, gym.spaces.Box):
+                # rescale to the right action space
+                act = act * env.action_space.high  # TODO maybe remove that
+                # and clip
+                act = np.clip(act, env.action_space.low, env.action_space.high)
+            else:
+                act = act[0]
 
         obs, reward, terminated, truncated, _ = env.step(act)
         done = terminated or truncated

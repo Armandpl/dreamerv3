@@ -2,6 +2,7 @@ import math
 from typing import Callable, Optional, Union
 
 import gymnasium
+import gymnasium as gym  # TODO import once
 import numpy as np
 import torch
 from tensordict.nn import inv_softplus
@@ -10,6 +11,8 @@ from torch.distributions import Independent
 
 from dreamer.distributions import (
     OneHotCategoricalStraightThroughUnimix,
+    TanhBijector,
+    TruncatedNormal,
     TwoHotEncodingDistribution,
 )
 from dreamer.ema import EMA
@@ -276,12 +279,16 @@ class Actor(nn.Module):
         super().__init__()
         self.action_space = action_space
         self.use_gsde = use_gsde
+        self.bijector = TanhBijector(1e-6)
 
-        out_action_shape = (
-            action_space.shape[0]
-            if isinstance(action_space, gymnasium.spaces.Box)
-            else action_space.n
-        )
+        if isinstance(action_space, gymnasium.spaces.Box):
+            if self.use_gsde:
+                out_action_shape = action_space.shape[0]
+            else:
+                out_action_shape = action_space.shape[0] * 2
+        elif isinstance(action_space, gymnasium.spaces.Discrete):
+            out_action_shape = action_space.n
+
         self.net = PredModel(DENSE_HIDDEN_UNITS, output_init=uniform_init_weights(1.0))
         self.head = nn.Sequential(
             nn.SiLU(),  # TODO should gsde use the activated neuron too?
@@ -310,38 +317,53 @@ class Actor(nn.Module):
         # self.exploration_matrices = self.weights_dist.rsample((batch_size,))
 
     def forward(self, ht, zt, explore: bool = True):
-        if self.count % self.gsde_sample_freq == 0:
-            self._sample_gsde_noise()
-        self.count += 1
+        if self.use_gsde:
+            if self.count % self.gsde_sample_freq == 0:
+                self._sample_gsde_noise()
+            self.count += 1
 
         features = self.net(ht, zt)
         output = self.head(features)
-        gsde_noise = None
 
         if isinstance(self.action_space, gymnasium.spaces.Discrete):
             dist = torch.distributions.Categorical(logits=output)
             act = dist.sample().unsqueeze(-1)
         else:
-            mean_action = output  # policy output
-            if self.clip_mean is not None:
-                mean_action = torch.functional.F.hardtanh(
-                    mean_action, min_val=-self.clip_mean, max_val=self.clip_mean
-                )
+            if self.use_gsde:
+                mean_action = output  # policy output
+                if self.clip_mean is not None:
+                    mean_action = torch.functional.F.hardtanh(
+                        mean_action, min_val=-self.clip_mean, max_val=self.clip_mean
+                    )
 
-            std = torch.exp(self.log_std)
-            if explore:
-                # adding gsde noise on top
-                expl_mat = self.exploration_mat.to(features.device) * std
-                gsde_noise = features @ expl_mat
-                act = mean_action + gsde_noise
+                std = torch.exp(self.log_std)
+                if explore:
+                    # adding gsde noise on top
+                    expl_mat = self.exploration_mat.to(features.device) * std
+                    gsde_noise = features @ expl_mat
+                    act = mean_action + gsde_noise
+                else:
+                    act = mean_action
+
+                act = self.bijector.forward(act)
+
+                # variance = torch.mm(features**2, std ** 2)
+                variance = (features**2) @ (std**2)
+                epsilon = 1e-6
+                dist = torch.distributions.Normal(mean_action, torch.sqrt(variance + epsilon))
             else:
-                act = mean_action
-
-            # variance = torch.mm(features**2, std ** 2)
-            variance = (features**2) @ (std**2)
-            epsilon = 1e-6
-            dist = torch.distributions.Normal(mean_action, torch.sqrt(variance + epsilon))
-        return dist, act, gsde_noise
+                mean, std = torch.chunk(output, 2, dim=-1)
+                # std = torch.exp(log_std)
+                # dist = torch.distributions.Normal(mean, std)
+                # dist = Independent(dist, 1)
+                std = 2 * torch.sigmoid((std + 0.0) / 2) + 0.1
+                dist = TruncatedNormal(torch.tanh(mean), std, -1, 1)
+                dist = Independent(dist, 1)
+                if explore:
+                    act = dist.rsample()
+                else:
+                    act = dist.mean
+        return dist, act
 
 
 class Critic(nn.Module):
@@ -389,11 +411,19 @@ def run_rollout(env, actor: Actor, rssm: RSSM, device: str = "cpu", render: bool
         episode_return = 0
 
         while not done:
-            _, act, _ = actor(ht_minus_1, zt_minus_1, explore=False)
+            _, act = actor(ht_minus_1, zt_minus_1, explore=False)
             ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
-            act = act.cpu()
+            act = act.cpu().squeeze(0)
 
-            obs, reward, terminated, truncated, _ = env.step(act.squeeze(0).item())
+            if isinstance(env.action_space, gym.spaces.Box):
+                # rescale to the right action space
+                act = act * env.action_space.high  # TODO maybe remove that
+                # and clip
+                act = np.clip(act, env.action_space.low, env.action_space.high)
+            else:
+                act = act[0]
+
+            obs, reward, terminated, truncated, _ = env.step(act)
             done = terminated or truncated
             # don't render if done bc it can fail w/ diverged furuta sim
             # TODO fix the root issue
