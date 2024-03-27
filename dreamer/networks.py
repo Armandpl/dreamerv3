@@ -1,4 +1,3 @@
-import math
 from typing import Callable, Optional, Union
 
 import gymnasium
@@ -413,7 +412,7 @@ def run_rollout(env, actor: Actor, rssm: RSSM, device: str = "cpu", render: bool
         while not done:
             _, act = actor(ht_minus_1, zt_minus_1, explore=False)
             ht_minus_1 = rssm.recurrent_model(ht_minus_1, zt_minus_1, act)
-            act = act.cpu().squeeze(0)
+            act = act.cpu().squeeze(0).numpy()
 
             if isinstance(env.action_space, gym.spaces.Box):
                 # rescale to the right action space

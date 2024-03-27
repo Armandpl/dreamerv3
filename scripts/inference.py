@@ -17,7 +17,7 @@ def main(artifact_alias: str):
     env = setup_env(DictConfig(creator_run.config).env, render_mode="human")
 
     world_model = RSSM(env.observation_space, env.action_space).to(device)
-    actor = Actor(env.action_space).to(device)
+    actor = Actor(env.action_space, creator_run.config["use_gsde"]).to(device)
 
     load_model_from_artifact(artifact_alias, world_model, actor, device=device)
 
