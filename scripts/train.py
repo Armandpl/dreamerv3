@@ -15,7 +15,6 @@ import wandb
 from dreamer.distributions import (
     BernoulliSafeMode,
     OneHotCategoricalStraightThroughUnimix,
-    TruncatedNormal,
     TwoHotEncodingDistribution,
 )
 from dreamer.functional import compute_lambda_returns, symlog
@@ -28,7 +27,12 @@ from dreamer.networks import (
     run_rollout,
 )
 from dreamer.replay_buffer import ReplayBuffer
-from dreamer.utils import count_parameters, save_model_to_artifacts, setup_env
+from dreamer.utils import (
+    count_parameters,
+    load_model_from_artifact,
+    save_model_to_artifacts,
+    setup_env,
+)
 
 # Tuning the HPs = losing
 # Actor Critic
@@ -239,7 +243,6 @@ def train_actor_critic(
     ).detach()  # .contiguous()
     _, ats[:, 0] = actor(sg(hts[:, 0]), sg(zts[:, 0]))
 
-    # with torch.no_grad():  # TODO torch no grad bc we not training the wm?
     for i in range(1, IMAGINE_HORIZON + 1):
         # with torch.no_grad():
         # predict the current recurrent state ht from the past
@@ -247,11 +250,12 @@ def train_actor_critic(
         # from that predict the stochastic state, and sample from it
         zt_dist, _ = world_model.transition_model(hts[:, i])
         zts[:, i] = zt_dist.sample()
+        # get grad for actor bc we might backprop through it for continous actions
         _, ats[:, i] = actor(sg(hts[:, i]), sg(zts[:, i]))
 
     # after doing the recurrent stuff we will do the reward, critic and continue predictions
     pred_rewards = TwoHotEncodingDistribution(
-        logits=world_model.reward_model(sg(hts), sg(zts)), dims=1
+        logits=world_model.reward_model(hts, zts), dims=1
     ).mean
     # values_dist = critic(sg(hts), sg(zts)) # do we need to use independant here? TODO
     values = critic(hts, zts).mean  # (B, T, 1)
@@ -404,6 +408,9 @@ def main(cfg: DictConfig):
         critic.parameters(), lr=ACTOR_CRITIC_LR, weight_decay=0.0, eps=ADAM_EPSILON
     )
 
+    if cfg.model_artifact is not None:
+        load_model_from_artifact(cfg.model_artifact, world_model, actor, critic)
+
     print(f"world model size: {count_parameters(world_model)/1e6:.2f}M")
     print(f"actor size: {count_parameters(actor)/1e6:.2f}M")
     print(f"critic size: {count_parameters(critic)/1e6:.2f}M")
@@ -449,13 +456,13 @@ def main(cfg: DictConfig):
             act = act.cpu().squeeze(0).numpy()
             if isinstance(env.action_space, gym.spaces.Box):
                 # rescale to the right action space
-                act = act * env.action_space.high  # TODO maybe remove that
+                scaled_act = act * env.action_space.high  # TODO maybe remove that
                 # and clip
-                act = np.clip(act, env.action_space.low, env.action_space.high)
+                scaled_act = np.clip(act, env.action_space.low, env.action_space.high)
             else:
                 act = act[0]
 
-        obs, reward, terminated, truncated, _ = env.step(act)
+        obs, reward, terminated, truncated, _ = env.step(scaled_act)
         done = terminated or truncated
         episode_return += reward
         episode_len += 1
