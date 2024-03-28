@@ -909,8 +909,8 @@ simple-pid = "^2.0.0"
 [package.source]
 type = "git"
 url = "https://github.com/Armandpl/furuta"
-reference = "9ec6de5"
-resolved_reference = "9ec6de56206acd2c11c8a45fe69d62914d52642a"
+reference = "ca89f4c"
+resolved_reference = "ca89f4c0e5ab22b9ecd71f14506423729ec0d97a"
 
 [[package]]
 name = "gitdb"
@@ -4247,4 +4247,4 @@ cffi = ["cffi (>=1.11)"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.9, <4.0"
-content-hash = "18ef33129085563d07bf871264c65406552035ef49df33e786e3d46790267433"
+content-hash = "92d71029e7499d922c593b8fe9bb65349c421b275aa09f0c1b05f02e7f547a32"

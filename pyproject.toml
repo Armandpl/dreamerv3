@@ -14,7 +14,7 @@ torch = "2.2.1"
 wandb = "^0.16.2"
 einops = "^0.7.0"
 gymnasium = {extras = ["accept-rom-license", "atari"], version = "^0.29.1"}
-furuta = {git = "https://github.com/Armandpl/furuta", rev="9ec6de5"}
+furuta = {git = "https://github.com/Armandpl/furuta", rev="ca89f4c"}
 hydra-core = "^1.3.2"
 pygame = "^2.5.2"
 torchrl = "^0.3.0"
