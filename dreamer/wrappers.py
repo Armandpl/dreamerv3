@@ -75,14 +75,13 @@ class DivergedSim(gym.Wrapper):
     """Check if furuta sim has diverged, if so, terminate the episode."""
 
     def step(self, action):
-        action = np.array([action])
         action = np.clip(action, -1, 1)
         obs, reward, terminated, truncated, info = self.env.step(action)
 
         # TODO shouldn't diverge anymore w/ the new sim, rename wrapper
-        # if np.any(np.isnan(obs)) or np.any(np.isinf(obs)):
-        #     terminated = True
-        #     obs = np.zeros_like(obs)
-        #     reward = 0.0
+        if np.any(np.isnan(obs)) or np.any(np.isinf(obs)):
+            terminated = True
+            obs = np.zeros_like(obs)
+            reward = 0.0
 
         return obs, reward, terminated, truncated, info
